@@ -180,6 +180,47 @@ function Set-TaskbarCombineAlways {
     Set-ItemProperty -Path $regPath -Name "TaskbarGlomLevel" -Value 0 -Force
 }
 
+function Set-Win11StartMenuPreferences {
+    $win11 = [System.Environment]::OSVersion.Version.Major -eq 10 -and `
+             [System.Environment]::OSVersion.Version.Build -ge 22000
+
+    if (-not $win11) { 
+        Write-Host "Win11 Start Menu - skipped"
+        return
+        }
+
+    # 1. More pins layout
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" `
+        -Name "Start_Layout" -Type DWord -Value 1 -Force
+
+    # 2. Disable recommended/recent items
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" `
+        -Name "Start_TrackDocs" -Type DWord -Value 0 -Force
+
+    # 3. Disable tips/shortcuts/new apps
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" `
+        -Name "SubscribedContent-338393Enabled" -Type DWord -Value 0 -Force
+
+    # 4. Enable recently added apps
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" `
+        -Name "Start_TrackProgs" -Type DWord -Value 1 -Force
+
+    # 5. Show Downloads and Settings next to power button
+    $path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel"
+    if (-not (Test-Path $path)) {
+        New-Item -Path $path -Force | Out-Null
+    }
+
+    $downloadsGuid = '{374DE290-123F-4565-9164-39C4925E467B}'
+    $settingsGuid  = '{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}'
+
+    Set-ItemProperty -Path $path -Name $downloadsGuid -Type DWord -Value 0 -Force
+    Set-ItemProperty -Path $path -Name $settingsGuid -Type DWord -Value 0 -Force
+    
+    Write-Host "Win11 Start Menu - done"
+
+}
+
 
 
 #endregion
@@ -205,6 +246,7 @@ Write-Host "Quick access - done"
 Disable-NotepadPlusPlusRememberLastSession
 Disable-KeyboardCrap
 Write-Host "Sticky keys - done"
+Set-Win11StartMenuPreferences
 
 
 Stop-Process -Name explorer -Force # to apply changes
