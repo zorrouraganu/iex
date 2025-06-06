@@ -216,11 +216,16 @@ function Set-Win11StartMenuPreferences {
 
     Set-ItemProperty -Path $path -Name $downloadsGuid -Type DWord -Value 0 -Force
     Set-ItemProperty -Path $path -Name $settingsGuid -Type DWord -Value 0 -Force
-    
+
     Write-Host "Win11 Start Menu - done"
 
 }
 
+function Enable-ClipboardHistory {
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Clipboard" `
+                     -Name "EnableClipboardHistory" `
+                     -Type DWord -Value 1 -Force
+}
 
 
 #endregion
@@ -247,7 +252,8 @@ Disable-NotepadPlusPlusRememberLastSession
 Disable-KeyboardCrap
 Write-Host "Sticky keys - done"
 Set-Win11StartMenuPreferences
-
+Enable-ClipboardHistory
+Write-Host "Clipboard history - done"
 
 Stop-Process -Name explorer -Force # to apply changes
 
