@@ -228,23 +228,26 @@ function Enable-ClipboardHistory {
 }
 
 function Disable-WidgetsButton {
-    # Check if OS is Windows 11 (Build 22000 or later)
     $buildNumber = [Environment]::OSVersion.Version.Build
     if ($buildNumber -lt 22000) {
         Write-Host "Widgets - skipped"
         return
     }
 
-    # Disable Widgets using registry
     $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-    $name = "TaskbarDa"
-    $value = 0
 
     try {
-        Set-ItemProperty -Path $regPath -Name $name -Value $value -Force
+        # Create missing key
+        if (-not (Test-Path $regPath)) {
+            New-Item -Path $regPath -Force | Out-Null
+        }
+
+        # Disable Widgets
+        New-ItemProperty -Path $regPath -Name "TaskbarDa" -Value 0 -PropertyType DWORD -Force | Out-Null
+
         Write-Host "Widgets - done"
     } catch {
-        Write-Error "Failed to update registry: $_"
+        Write-Error "Registry update failed: $_"
     }
 }
 
