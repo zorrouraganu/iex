@@ -247,8 +247,6 @@ function Disable-WidgetsButton {
     Write-Host "Widgets - done"
 }
 
-
-
 #endregion
 
 #region Execution
