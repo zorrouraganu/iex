@@ -234,22 +234,19 @@ function Disable-WidgetsButton {
         return
     }
 
-    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    $key = "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    $name = "TaskbarDa"
+    $value = "0"
 
-    try {
-        # Create missing key
-        if (-not (Test-Path $regPath)) {
-            New-Item -Path $regPath -Force | Out-Null
-        }
+    # Create the key if it doesn't exist
+    cmd /c "reg add `"$key`" /f" | Out-Null
 
-        # Disable Widgets
-        New-ItemProperty -Path $regPath -Name "TaskbarDa" -Value 0 -PropertyType DWORD -Force | Out-Null
+    # Set the value to disable widgets
+    cmd /c "reg add `"$key`" /v $name /t REG_DWORD /d $value /f" | Out-Null
 
-        Write-Host "Widgets - done"
-    } catch {
-        Write-Error "Registry update failed: $_"
-    }
+    Write-Host "Widgets - done"
 }
+
 
 
 #endregion
