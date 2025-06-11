@@ -234,18 +234,17 @@ function Disable-WidgetsButton {
         return
     }
 
-    $key = "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-    $name = "TaskbarDa"
+    # New location for 24H2
+    $key = "HKCU\Software\Microsoft\Windows\Shell\Widgets"
+    $name = "TaskbarShown"
     $value = "0"
 
-    # Create the key if it doesn't exist
     cmd /c "reg add `"$key`" /f" | Out-Null
-
-    # Set the value to disable widgets
     cmd /c "reg add `"$key`" /v $name /t REG_DWORD /d $value /f" | Out-Null
 
     Write-Host "Widgets - done"
 }
+
 
 #endregion
 
