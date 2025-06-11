@@ -227,6 +227,27 @@ function Enable-ClipboardHistory {
                      -Type DWord -Value 1 -Force
 }
 
+function Disable-WidgetsButton {
+    # Check if OS is Windows 11 (Build 22000 or later)
+    $buildNumber = [Environment]::OSVersion.Version.Build
+    if ($buildNumber -lt 22000) {
+        Write-Host "Widgets - skipped"
+        return
+    }
+
+    # Disable Widgets using registry
+    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    $name = "TaskbarDa"
+    $value = 0
+
+    try {
+        Set-ItemProperty -Path $regPath -Name $name -Value $value -Force
+        Write-Host "Widgets - done"
+    } catch {
+        Write-Error "Failed to update registry: $_"
+    }
+}
+
 
 #endregion
 
@@ -254,6 +275,7 @@ Write-Host "Sticky keys - done"
 Set-Win11StartMenuPreferences
 Enable-ClipboardHistory
 Write-Host "Clipboard history - done"
+Disable-WidgetsButton
 
 Stop-Process -Name explorer -Force # to apply changes
 
