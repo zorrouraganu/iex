@@ -377,7 +377,7 @@ public class NativeMethods {
     # 20 = SPI_SETDESKWALLPAPER, 3 = SPIF_UPDATEINIFILE | SPIF_SENDWININICHANGE
     [NativeMethods]::SystemParametersInfo(20, 0, "", 3) | Out-Null
 
-    Write-Output "Wallpaper set to solid black."
+    Write-Output "Wallpaper - done"
 }
 
 
@@ -398,16 +398,16 @@ function Remove-StartMenuRecommendations {
 
 
 function Add-StartMenuFolders {
-    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartPage"
 
-    # Create path if it doesn't exist
+    # Create the path if it doesn't exist
     if (-not (Test-Path $regPath)) {
         New-Item -Path $regPath -Force | Out-Null
     }
 
-    # Enable Settings and Downloads on Start menu
-    Set-ItemProperty -Path $regPath -Name "Start_ShowSettings"  -Value 1 -Type DWord
-    Set-ItemProperty -Path $regPath -Name "Start_ShowDownloads" -Value 1 -Type DWord
+    # Enable Settings and Downloads buttons
+    Set-ItemProperty -Path $regPath -Name "ShowSettings"  -Value 1 -Type DWord
+    Set-ItemProperty -Path $regPath -Name "ShowDownloads" -Value 1 -Type DWord
 
     Write-Output "Start folders - done"
 }
@@ -476,9 +476,6 @@ else {
     Disable-Spotlight # gets rid of spotlight
     Remove-BloatwareForCurrentUser # removes bloat
 }
-
-
-
 
 Stop-Process -Name explorer -Force # to apply changes
 
