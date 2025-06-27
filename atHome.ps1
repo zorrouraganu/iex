@@ -251,6 +251,33 @@ function Disable-WidgetsButton {
     Write-Output "Widgets - done"
 }
 
+function Remove-PinnedTaskbarIcons {
+    $appsToRemove = @(
+        "Microsoft.WindowsStore_8wekyb3d8bbwe!App",
+        "Microsoft.MicrosoftOfficeHub_8wekyb3d8bbwe!Microsoft.MicrosoftOfficeHub"
+    )
+
+    foreach ($appId in $appsToRemove) {
+        $command = "explorer.exe shell:Appsfolder\$appId"
+        $verb = "unpin from taskbar"
+
+        # Get the shell application object
+        $shellApp = New-Object -ComObject Shell.Application
+        $folder = $shellApp.Namespace("shell:Appsfolder")
+
+        foreach ($item in $folder.Items()) {
+            if ($item.Path -eq $command) {
+                foreach ($itemVerb in $item.Verbs()) {
+                    if ($itemVerb.Name.Replace('&','').ToLower() -eq $verb) {
+                        $itemVerb.DoIt()
+                        Write-Output "Unpinned: $appId"
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 #endregion
 
@@ -279,6 +306,7 @@ Set-Win11StartMenuPreferences
 Enable-ClipboardHistory
 Write-Host "Clipboard history - done"
 Disable-WidgetsButton
+Remove-PinnedTaskbarIcons
 
 Stop-Process -Name explorer -Force # to apply changes
 
