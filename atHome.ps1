@@ -359,18 +359,27 @@ function Remove-BloatwareForCurrentUser {
 }
 
 function Set-SolidBlackWallpaper {
-    # Set registry to use solid color background
+    # Set registry values
     Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "Wallpaper" -Value ""
     Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallpaperStyle" -Value "0"
     Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "TileWallpaper" -Value "0"
+    Set-ItemProperty -Path "HKCU:\Control Panel\Colors"   -Name "Background" -Value "0 0 0"
 
-    # Set background color to black (RGB 0 0 0)
-    Set-ItemProperty -Path "HKCU:\Control Panel\Colors" -Name "Background" -Value "0 0 0"
-
-    # Apply the change immediately
-    rundll32.exe user32.dll,UpdatePerUserSystemParameters
-    Write-Output "Wallpaper - done"
+    # Apply changes immediately using user32.dll
+    Add-Type @"
+using System.Runtime.InteropServices;
+public class NativeMethods {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
 }
+"@
+
+    # 20 = SPI_SETDESKWALLPAPER, 3 = SPIF_UPDATEINIFILE | SPIF_SENDWININICHANGE
+    [NativeMethods]::SystemParametersInfo(20, 0, "", 3) | Out-Null
+
+    Write-Output "Wallpaper set to solid black."
+}
+
 
 function Remove-StartMenuRecommendations {
     # Disable Recommendations in Start Menu for current user
