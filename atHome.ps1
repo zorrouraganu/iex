@@ -398,24 +398,23 @@ function Remove-StartMenuRecommendations {
 
 
 function Add-StartMenuFolders {
-    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start"
-    $valueName = "VisiblePlaces"
-
-    # Hex value for enabling Settings and Downloads:
-    # 86,08,73,52,aa,51,43,42,9f,7b,27,76,58,46,59,d4
-    $hex = "86,08,73,52,AA,51,43,42,9F,7B,27,76,58,46,59,D4"
+    $base = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount'
+    $pattern = '*windows.data.unifiedtile.startglobalproperties*'
+    # Binary enabling both Settings & Downloads (16 bytes)
+    $hex = '02,00,00,00,e6,e3,14,8b,6c,38,d9,01,00,00,00,00'
     $bytes = $hex -split ',' | ForEach-Object { [byte]"0x$_" }
 
-    # Create key if missing
-    if (-not (Test-Path $regPath)) {
-        New-Item -Path $regPath -Force | Out-Null
+    Get-ChildItem -Path $base -ErrorAction SilentlyContinue | Where-Object Name -like $pattern | ForEach-Object {
+        $currentPath = Join-Path $_.PSPath 'Current'
+        if (Test-Path $currentPath) {
+            Set-ItemProperty -Path $currentPath -Name 'Data' -Value ([byte[]]$bytes)
+            Write-Output "Updated Start menu CloudStore under $($_.Name)"
+        }
     }
 
-    # Set the binary value
-    Set-ItemProperty -Path $regPath -Name $valueName -Value ([byte[]]$bytes) -Force
-
-    Write-Output "Start folders - done"
+    Write-Output "Start folder - done"
 }
+
 
 
 
