@@ -472,13 +472,18 @@ else {
 if (Is-DomainJoined) {
     Write-Host "Spotlight - skipped"
     Write-Host "Bloatware - skipped"
-    if ((Get-WindowsMajorversion) -ge 11) {
-        Remove-StartMenuRecommendations # removes recommendations completely
-    }
+    Write-Host "Start recommendations - skipped"
 }
 else {
     Disable-Spotlight # gets rid of spotlight
     Remove-BloatwareForCurrentUser # removes bloat
+    if ((Get-WindowsMajorversion) -ge 11) {
+        Remove-StartMenuRecommendations # removes recommendations completely
+        Write-Host "Start recommendations - done"
+    }
+    else {
+        Write-Host "Start recommendations - skipped"
+    }
 }
 
 Stop-Process -Name explorer -Force # to apply changes
