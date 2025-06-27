@@ -228,21 +228,27 @@ function Enable-ClipboardHistory {
 }
 
 function Disable-WidgetsButton {
-    $buildNumber = [Environment]::OSVersion.Version.Build
+    # Check if the OS is Windows 11
+    $osVersion = (Get-CimInstance -ClassName Win32_OperatingSystem).Version
+    $buildNumber = [int]($osVersion.Split('.')[2])
+
     if ($buildNumber -lt 22000) {
-        Write-Host "Widgets - skipped"
+        Write-Output "Widgets - skipped"
         return
     }
 
-    # New location for 24H2
-    $key = "HKCU\Software\Microsoft\Windows\Shell\Widgets"
-    $name = "TaskbarShown"
-    $value = "0"
+    # Registry path for Widgets taskbar setting
+    $regPath = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh"
 
-    cmd /c "reg add `"$key`" /f" | Out-Null
-    cmd /c "reg add `"$key`" /v $name /t REG_DWORD /d $value /f" | Out-Null
+    # Create key if it doesn't exist
+    if (-not (Test-Path $regPath)) {
+        New-Item -Path $regPath -Force | Out-Null
+    }
 
-    Write-Host "Widgets - done"
+    # Set the value to disable widgets
+    New-ItemProperty -Path $regPath -Name "AllowNewsAndInterests" -PropertyType DWord -Value 0 -Force | Out-Null
+
+    Write-Output "Widgets - done"
 }
 
 
