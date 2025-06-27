@@ -235,7 +235,7 @@ function Disable-WidgetsButton {
     }
 
     # New location for 24H2
-    $key = "HKCU\Software\Microsoft\Windows\Shell\Widgets"
+    $key = "HKCU:\Software\Microsoft\Windows\Shell\Widgets"
     $name = "TaskbarShown"
     $value = "0"
 
