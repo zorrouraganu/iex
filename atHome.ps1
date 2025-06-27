@@ -1,4 +1,75 @@
-#region Functions
+#region Helper functions
+
+function Is-VirtualMachine {
+    $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+    $manufacturer = $cs.Manufacturer
+    $model = $cs.Model
+
+    $vmIndicators = @("Microsoft Corporation", "VMware", "VirtualBox", "QEMU", "Xen", "KVM", "Parallels")
+
+    foreach ($vendor in $vmIndicators) {
+        if ($manufacturer -like "*$vendor*" -or $model -like "*$vendor*") {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Is-DomainJoined {
+    $computerSystem = Get-CimInstance -Class Win32_ComputerSystem
+    return $computerSystem.PartOfDomain
+}
+
+function Is-Laptop {
+    # Check for internal battery
+    $battery = Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue
+    if ($battery) {
+        return $true
+    }
+
+    # Check chassis type for laptop indicators
+    $chassis = Get-CimInstance -ClassName Win32_SystemEnclosure
+    $laptopTypes = @(8, 9, 10, 14)  # Portable, Laptop, Notebook, SubNotebook
+
+    foreach ($type in $chassis.ChassisTypes) {
+        if ($laptopTypes -contains $type) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-WindowsMajorVersion {
+    $version = (Get-CimInstance -ClassName Win32_OperatingSystem).Version
+    $build = [int]($version.Split('.')[2])
+
+    if ($build -ge 22000) {
+        return 11
+    } else {
+        return 10
+    }
+}
+
+function Get-WindowsEdition {
+    $releaseId = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "DisplayVersion" -ErrorAction SilentlyContinue
+    if (-not $releaseId) {
+        # Fallback for older Windows 10 versions
+        $releaseId = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "ReleaseId" -ErrorAction SilentlyContinue
+    }
+
+    if ($releaseId) {
+        return $releaseId
+    } else {
+        return "Unknown"
+    }
+}
+
+
+#endregion
+
+#region Main Functions
 function Set-KeyboardLanguages {
     # Define desired layouts
     $desiredLayouts = @("0409:00000409", "0418:00010418") # English (US), Romanian Standard
@@ -181,14 +252,6 @@ function Set-TaskbarCombineAlways {
 }
 
 function Set-Win11StartMenuPreferences {
-    $win11 = [System.Environment]::OSVersion.Version.Major -eq 10 -and `
-             [System.Environment]::OSVersion.Version.Build -ge 22000
-
-    if (-not $win11) { 
-        Write-Host "Win11 Start Menu - skipped"
-        return
-        }
-
     # 1. More pins layout
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" `
         -Name "Start_Layout" -Type DWord -Value 1 -Force
@@ -251,52 +314,162 @@ function Disable-WidgetsButton {
     Write-Output "Widgets - done"
 }
 
-function Remove-PinnedTaskbarIcons {
-    $taskbarPath = "$env:APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"
+function Disable-Spotlight {
+    $basePath = "HKCU:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"
 
-    $targets = @(
-        "Microsoft Store.lnk",
-        "Office.lnk"
+    if (-not (Test-Path $basePath)) {
+        New-Item -Path $basePath -Force | Out-Null
+    }
+
+    # Set GPO-equivalent values to disable Spotlight
+    $settings = @{
+        "DisableWindowsSpotlightFeatures"          = 1  # Master switch
+        "DisableWindowsSpotlightOnActionCenter"    = 1
+        "DisableWindowsSpotlightOnLockScreen"      = 1
+        "DisableWindowsSpotlightSuggestions"       = 1
+    }
+
+    foreach ($name in $settings.Keys) {
+        New-ItemProperty -Path $basePath -Name $name -Value $settings[$name] -PropertyType DWord -Force | Out-Null
+    }
+
+    Write-Output "Spotlight - done"
+}
+
+function Remove-BloatwareForCurrentUser {
+    $appsToRemove = @(
+        "Microsoft.WindowsFeedbackHub",
+        "Microsoft.ZuneMusic",              # Media Player
+        "Microsoft.Clipchamp",
+        "MicrosofWt.BingNews",
+        "Microsoft.QuickAssist",
+        "Microsoft.MicrosoftSolitaireCollection",
+        "Microsoft.MicrosoftStickyNotes",
+        "Microsoft.BingWeather"
     )
 
-    foreach ($shortcut in $targets) {
-        $fullPath = Join-Path $taskbarPath $shortcut
-        if (Test-Path $fullPath) {
-            Remove-Item $fullPath -Force
-            Write-Output "Removed pinned icon: $shortcut"
+    foreach ($app in $appsToRemove) {
+        $installed = Get-AppxPackage -Name $app
+        if ($installed) {
+            Remove-AppxPackage -Package $installed.PackageFullName -ErrorAction SilentlyContinue
         }
     }
+
+    Write-Host "Bloatware - done"
 }
+
+function Set-SolidBlackWallpaper {
+    # Set registry to use solid color background
+    Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "Wallpaper" -Value ""
+    Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "WallpaperStyle" -Value "0"
+    Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "TileWallpaper" -Value "0"
+
+    # Set background color to black (RGB 0 0 0)
+    Set-ItemProperty -Path "HKCU:\Control Panel\Colors" -Name "Background" -Value "0 0 0"
+
+    # Apply the change immediately
+    rundll32.exe user32.dll,UpdatePerUserSystemParameters
+    Write-Output "Wallpaper - done"
+}
+
+function Remove-StartMenuRecommendations {
+    # Disable Recommendations in Start Menu for current user
+    $regPath = "HKCU:\Software\Policies\Microsoft\Windows\Explorer"
+    
+    # Create key if missing
+    if (-not (Test-Path $regPath)) {
+        New-Item -Path $regPath -Force | Out-Null
+        # Set policy: HideRecommendedSection = 1
+        New-ItemProperty -Path $regPath -Name "HideRecommendedSection" -Value 1 -PropertyType DWord -Force | Out-Null
+        
+        Write-Output "Start recommendations - done"
+    
+    }
+}
+
+
+function Add-StartMenuFolders {
+    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+
+    # Create path if it doesn't exist
+    if (-not (Test-Path $regPath)) {
+        New-Item -Path $regPath -Force | Out-Null
+    }
+
+    # Enable Settings and Downloads on Start menu
+    Set-ItemProperty -Path $regPath -Name "Start_ShowSettings"  -Value 1 -Type DWord
+    Set-ItemProperty -Path $regPath -Name "Start_ShowDownloads" -Value 1 -Type DWord
+
+    Write-Output "Start folders - done"
+}
+
 
 
 #endregion
 
 #region Execution
 
+
 Write-Host "Start script execution"
-Set-KeyboardLanguages
-Write-Host "Keboard languages - done"
-Remove-TaskbarCrap
+
+Set-KeyboardLanguages # set keyboard to En-US & Ro-RO
+Write-Host "Keyboard languages - done"
+
+Remove-TaskbarCrap # gets rid of spotlight & task view
 Set-TaskbarCombineAlways
 Write-Host "Taskbar - done"
-Set-DarkModeOn
+
+Set-DarkModeOn # sets dark mode
 Write-Host "Dark mode - done"
-Set-WindowsAccentColorDefaultBlue
+
+Set-WindowsAccentColorDefaultBlue # sets blue as the accent color
 Write-Host "Accent color - done"
-Center-StartButton
-Enable-ShowExtensionsAndHiddenFiles
-Set-ExplorerToOpenThisPC
+
+Center-StartButton # centers start button
+Enable-ShowExtensionsAndHiddenFiles # changes file explorer behavior to show extensions & hidden stuff
+Set-ExplorerToOpenThisPC # opens file explorer to This PC instead of quick access
 Write-Host "File explorer - done"
-Remove-MusicAndVideosFromQuickAccess
-Write-Host "Quick access - done"
-Disable-NotepadPlusPlusRememberLastSession
-Disable-KeyboardCrap
+
+Disable-NotepadPlusPlusRememberLastSession # disables npp persistent sessions
+
+Disable-KeyboardCrap # disables sticky keys & toggle keys
 Write-Host "Sticky keys - done"
-Set-Win11StartMenuPreferences
-Enable-ClipboardHistory
+
+Enable-ClipboardHistory # enables clipboard history
 Write-Host "Clipboard history - done"
-Disable-WidgetsButton
-Remove-PinnedTaskbarIcons
+
+Disable-WidgetsButton # gets rid of widgets
+
+Set-SolidBlackWallpaper # simple black wallpaper
+
+# OS dependent tasks
+if ((Get-WindowsMajorVersion) -lt 11) {
+    Remove-MusicAndVideosFromQuickAccess # gets rid of Music & Videos from quick access (win10 only)
+    Write-Host "Quick access - done"
+    Write-Host "Win11 Start menu - skipped"
+    Write-Host "Start folders - skipped"
+}
+else {
+    Write-Host "Quick access - skipped"
+    Set-Win11StartMenuPreferences # gets rid of start menu bloat
+    Add-StartMenuFolders # adds settings & downloads to start
+}
+
+# domain state dependent tasks
+if (Is-DomainJoined) {
+    Write-Host "Spotlight - skipped"
+    Write-Host "Bloatware - skipped"
+    if ((Get-WindowsMajorversion) -ge 11) {
+        Remove-StartMenuRecommendations # removes recommendations completely
+    }
+}
+else {
+    Disable-Spotlight # gets rid of spotlight
+    Remove-BloatwareForCurrentUser # removes bloat
+}
+
+
+
 
 Stop-Process -Name explorer -Force # to apply changes
 
