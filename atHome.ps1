@@ -398,19 +398,25 @@ function Remove-StartMenuRecommendations {
 
 
 function Add-StartMenuFolders {
-    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartPage"
+    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start"
+    $valueName = "VisiblePlaces"
 
-    # Create the path if it doesn't exist
+    # Hex value for enabling Settings and Downloads:
+    # 86,08,73,52,aa,51,43,42,9f,7b,27,76,58,46,59,d4
+    $hex = "86,08,73,52,AA,51,43,42,9F,7B,27,76,58,46,59,D4"
+    $bytes = $hex -split ',' | ForEach-Object { [byte]"0x$_" }
+
+    # Create key if missing
     if (-not (Test-Path $regPath)) {
         New-Item -Path $regPath -Force | Out-Null
     }
 
-    # Enable Settings and Downloads buttons
-    Set-ItemProperty -Path $regPath -Name "ShowSettings"  -Value 1 -Type DWord
-    Set-ItemProperty -Path $regPath -Name "ShowDownloads" -Value 1 -Type DWord
+    # Set the binary value
+    Set-ItemProperty -Path $regPath -Name $valueName -Value ([byte[]]$bytes) -Force
 
     Write-Output "Start folders - done"
 }
+
 
 
 
