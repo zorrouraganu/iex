@@ -398,25 +398,24 @@ function Remove-StartMenuRecommendations {
 
 
 function Add-StartMenuFolders {
-    $base = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount'
-    $pattern = '*windows.data.unifiedtile.startglobalproperties*'
-    # Binary enabling both Settings & Downloads (16 bytes)
-    $hex = '02,00,00,00,e6,e3,14,8b,6c,38,d9,01,00,00,00,00'
-    $bytes = $hex -split ',' | ForEach-Object { [byte]"0x$_" }
+    param(
+        [switch]$EnableSettings,
+        [switch]$EnableDownloads
+    )
 
-    Get-ChildItem -Path $base -ErrorAction SilentlyContinue | Where-Object Name -like $pattern | ForEach-Object {
-        $currentPath = Join-Path $_.PSPath 'Current'
-        if (Test-Path $currentPath) {
-            Set-ItemProperty -Path $currentPath -Name 'Data' -Value ([byte[]]$bytes)
-            Write-Output "Updated Start menu CloudStore under $($_.Name)"
+    # Define JSON payload for MDM CSP Start/StartPlaces
+    $payload = @{
+        StartPlaces = @{
+            Settings   = [int]$EnableSettings
+            Downloads  = [int]$EnableDownloads
         }
-    }
+    } | ConvertTo-Json -Depth 4
 
-    Write-Output "Start folder - done"
+    # Write using the MDM Bridge WMI provider
+    Invoke-CimMethod -Namespace root\cimv2\mdm\dmmap -Class MDM_Start -Method Set /Payload:$payload
+
+    Write-Output "Attempted to set Start menu folders via MDM Bridge. You may need to restart Explorer or log off for the changes to appear."
 }
-
-
-
 
 
 #endregion
@@ -466,7 +465,7 @@ if ((Get-WindowsMajorVersion) -lt 11) {
 else {
     Write-Host "Quick access - skipped"
     Set-Win11StartMenuPreferences # gets rid of start menu bloat
-    Add-StartMenuFolders # adds settings & downloads to start
+    Add-StartMenuFolders -EnableSettings -EnableDownloads # adds settings & downloads to start
 }
 
 # domain state dependent tasks
