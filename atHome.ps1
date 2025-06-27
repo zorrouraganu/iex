@@ -252,28 +252,18 @@ function Disable-WidgetsButton {
 }
 
 function Remove-PinnedTaskbarIcons {
-    $appsToRemove = @(
-        "Microsoft.WindowsStore_8wekyb3d8bbwe!App",
-        "Microsoft.MicrosoftOfficeHub_8wekyb3d8bbwe!Microsoft.MicrosoftOfficeHub"
+    $taskbarPath = "$env:APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"
+
+    $targets = @(
+        "Microsoft Store.lnk",
+        "Office.lnk"
     )
 
-    foreach ($appId in $appsToRemove) {
-        $command = "explorer.exe shell:Appsfolder\$appId"
-        $verb = "unpin from taskbar"
-
-        # Get the shell application object
-        $shellApp = New-Object -ComObject Shell.Application
-        $folder = $shellApp.Namespace("shell:Appsfolder")
-
-        foreach ($item in $folder.Items()) {
-            if ($item.Path -eq $command) {
-                foreach ($itemVerb in $item.Verbs()) {
-                    if ($itemVerb.Name.Replace('&','').ToLower() -eq $verb) {
-                        $itemVerb.DoIt()
-                        Write-Output "Unpinned: $appId"
-                    }
-                }
-            }
+    foreach ($shortcut in $targets) {
+        $fullPath = Join-Path $taskbarPath $shortcut
+        if (Test-Path $fullPath) {
+            Remove-Item $fullPath -Force
+            Write-Output "Removed pinned icon: $shortcut"
         }
     }
 }
