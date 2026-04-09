@@ -1228,7 +1228,7 @@ if (-not $IncludeUpdateAllButton) {
     $script:BtnUpdateAll.Visibility = 'Collapsed'
 }
 
-$script:TxtLogPath.Text = "Log: $script:LogPath"
+$script:TxtLogPath.Text = "by zorrouraganu | Log: $script:LogPath"
 $script:LvCommon.ItemsSource = $script:SelectedPackages
 $script:LvSearch.ItemsSource = $script:ResultPackages
 $script:TxtSearch.Text = $StartupSearchText
