@@ -18,7 +18,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 #region Configuration
-$AppTitle                 = 'WinGet GUI'
+$AppTitle                 = 'wiGUI'
 $WindowWidth              = 1320
 $WindowHeight             = 860
 $SearchResultLimit        = 100
@@ -1051,7 +1051,7 @@ $Xaml = @"
 
                 <StackPanel Grid.Column="0">
                     <TextBlock Text="$AppTitle" FontSize="26" FontWeight="SemiBold"/>
-                    <TextBlock Margin="0,6,0,0" Text="Version 1.0 (April 2026)" Foreground="{StaticResource TextMutedBrush}" FontSize="13"/>
+                    <TextBlock Margin="0,6,0,0" Text="Version 2.0 (April 2026)" Foreground="{StaticResource TextMutedBrush}" FontSize="13"/>
                     <TextBlock Margin="0,8,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="12" x:Name="TxtLogPath"/>
                 </StackPanel>
 
