@@ -537,14 +537,13 @@ function ConvertFrom-WingetSearchOutput {
         $name = $values[0]
         $id = $values[1]
         $version = $values[2]
-        $source = $values[$values.Count - 1]
 
         if ([string]::IsNullOrWhiteSpace($name) -or [string]::IsNullOrWhiteSpace($id)) {
             continue
         }
 
-        $packageSource = if ([string]::IsNullOrWhiteSpace($source)) { $DefaultWingetSource } else { $source }
-        [void]$items.Add((New-PackageItem -Name $name -Id $id -Version $version -Source $packageSource -Origin 'Search'))
+        # Search is already restricted to $DefaultWingetSource, so do not trust parsed "source" text.
+        [void]$items.Add((New-PackageItem -Name $name -Id $id -Version $version -Source $DefaultWingetSource -Origin 'Search'))
     }
 
     return @($items.ToArray())
@@ -679,6 +678,11 @@ function Install-PackageSelection {
 
     if ($result.ExitCode -eq 0) {
         Write-Log ("Installed '{0}' successfully." -f $Package.Name) 'SUCCESS'
+        return $true
+    }
+
+    if (Test-WingetInstallNoOpSuccess -ExitCode $result.ExitCode) {
+        Write-Log ("'{0}' is already installed and no applicable newer version is available. Treating as success." -f $Package.Name) 'SUCCESS'
         return $true
     }
 
@@ -859,6 +863,52 @@ function Invoke-WingetUpdateAll {
     Write-Log ("Upgrade all completed with errors. Successes: {0}. Failures: {1}." -f $successCount, $failureCount) 'ERROR'
     return $false
 }
+
+function Test-WingetSourceName {
+    param([string]$Source)
+
+    if ([string]::IsNullOrWhiteSpace($Source)) {
+        return $false
+    }
+
+    switch -Regex ($Source.Trim()) {
+        '^(winget|msstore|winget-font)$' { return $true }
+        default { return $false }
+    }
+}
+
+function Get-SafePackageSource {
+    param($Package)
+
+    $candidate = [string]$Package.Source
+
+    if (Test-WingetSourceName -Source $candidate) {
+        return $candidate.Trim()
+    }
+
+    if ($Package.Origin -eq 'Search') {
+        Write-Log ("Invalid parsed source '{0}' for '{1}'. Falling back to default source '{2}'." -f $candidate, $Package.Name, $DefaultWingetSource) 'WARN'
+        return $DefaultWingetSource
+    }
+
+    if ($Package.Origin -eq 'Startup') {
+        return $DefaultWingetSource
+    }
+
+    return $DefaultWingetSource
+}
+
+$script:WingetExit_UpdateNotApplicable = -1978335189
+
+function Test-WingetInstallNoOpSuccess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$ExitCode
+    )
+
+    return ($ExitCode -eq $script:WingetExit_UpdateNotApplicable)
+}
+
 #endregion
 
 #region UI
