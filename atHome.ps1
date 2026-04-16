@@ -1,7 +1,7 @@
 #-----------------------------------------------------------------------------HEADER-------------------------------------------------------------------------------
 # File : atHome.ps1
 # Author : zorrouraganu	
-# Version : 2.0.0
+# Version : 2.0.1
 # Description : Feel @home script that turns any Windows 11 machine into my own 
 #
 # Version History:
@@ -10,6 +10,7 @@
 # -----------------------------------------------------------------------------------------------------------------------------------------------------------------
 # 1.0		June 2025			zorrouraganu        		Creation of script
 # 2.0		April 2026			zorrouraganu        		Complete rework
+# 2.0.1     April 2026          zorrouraganu                Dealt with new Category view mode in Start Menu in 25H2
 # 
 #-----------------------------------------------------------------------------HEADER-------------------------------------------------------------------------------
 
@@ -500,6 +501,8 @@ function Set-StartMenuPreferences {
     Set-RegistryValue -Path $startPol -Name 'ShowOrHideMostUsedApps'        -Value 2 -Type DWord # Most used off
     Set-RegistryValue -Path $startPol -Name 'HideRecommendedSection'        -Value 1 -Type DWord # Recommended off
     Set-RegistryValue -Path $startPol -Name 'HideRecommendedPersonalizedSites' -Value 1 -Type DWord
+
+    Set-RegistryValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Start' -Name 'AllAppsViewMode' -Value 2 -Type DWord # Sets apps view mode to List
 
     Set-StartVisiblePlaces
 }
