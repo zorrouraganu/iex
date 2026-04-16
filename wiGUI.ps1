@@ -25,7 +25,7 @@ $SearchResultLimit        = 100
 $DefaultSilentInstall     = $true
 $LogFolderName            = 'wiGUI'
 $DefaultWingetSource      = 'winget'
-$RepositorySearchHint     = 'Search the winget repository (leave blank to browse)'
+$RepositorySearchHint     = 'Search one package by name or ID'
 $EnableMicaBackdrop       = $true
 $IncludeUpdateAllButton   = $true
 
@@ -46,7 +46,6 @@ $CommonApps = @(
     @{ Name = 'Discord';               Id = 'Discord.Discord';               Source = 'winget' }
 )
 
-$StartupSearchText = ($CommonApps | ForEach-Object { $_.Name }) -join [Environment]::NewLine
 #endregion
 
 #region Bootstrap
@@ -89,19 +88,45 @@ function Set-UiBusy {
     )
 
     $script:IsBusy = $Busy
-    $script:Window.Cursor = if ($Busy) { [System.Windows.Input.Cursors]::Wait } else { [System.Windows.Input.Cursors]::Arrow }
-    $script:ProgressBar.IsIndeterminate = $Busy
-    $script:BtnInstall.IsEnabled = -not $Busy
-    $script:BtnSearch.IsEnabled = -not $Busy
-    $script:BtnShowStartupApps.IsEnabled = -not $Busy
-    $script:BtnClearSearch.IsEnabled = -not $Busy
-    $script:BtnOpenLogs.IsEnabled = -not $Busy
-    if ($script:BtnUpdateAll) {
-        $script:BtnUpdateAll.IsEnabled = (-not $Busy)
-    }
 
     if ($StatusText) {
         $script:LblStatus.Text = $StatusText
+        if ($script:BusyOverlayMessage) {
+            $script:BusyOverlayMessage.Text = $StatusText
+        }
+    }
+    elseif ($script:BusyOverlayMessage) {
+        $script:BusyOverlayMessage.Text = 'Working...'
+    }
+
+    $script:Window.Cursor = if ($Busy) {
+        [System.Windows.Input.Cursors]::Wait
+    }
+    else {
+        [System.Windows.Input.Cursors]::Arrow
+    }
+
+    $script:ProgressBar.IsIndeterminate = $Busy
+
+    if ($script:BusyOverlay) {
+        $script:BusyOverlay.Visibility = if ($Busy) { 'Visible' } else { 'Collapsed' }
+        $script:BusyOverlay.IsHitTestVisible = $Busy
+    }
+
+    $script:Window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
+}
+
+function Set-BusyMessage {
+    param([string]$Message)
+
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        return
+    }
+
+    $script:LblStatus.Text = $Message
+
+    if ($script:BusyOverlayMessage) {
+        $script:BusyOverlayMessage.Text = $Message
     }
 
     $script:Window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
@@ -246,13 +271,18 @@ function Find-SelectedPackageByKey {
 }
 
 function Set-ResultPackages {
-    param([Parameter(Mandatory = $true)][object[]]$Items)
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Items
+    )
 
     $script:ResultPackages.Clear()
 
-    foreach ($incoming in $Items) {
+    foreach ($incoming in @($Items)) {
         $key = Get-PackageKey -Package $incoming
         $selectedItem = Find-SelectedPackageByKey -Key $key
+
         if ($selectedItem) {
             $selectedItem.Name = $incoming.Name
             $selectedItem.Id = $incoming.Id
@@ -551,75 +581,37 @@ function ConvertFrom-WingetSearchOutput {
 
 function Search-WingetRepository {
     param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
         [string]$Query,
+
         [int]$Count = $SearchResultLimit
     )
 
-    $args = @('search', '--source', $DefaultWingetSource, '--accept-source-agreements', '--disable-interactivity', '--count', [string]$Count)
+    $trimmedQuery = $Query.Trim()
 
-    if ([string]::IsNullOrWhiteSpace($Query)) {
-        $args += @('-q', '')
+    if ([string]::IsNullOrWhiteSpace($trimmedQuery)) {
+        throw 'Search query cannot be empty.'
     }
-    else {
-        $args += $Query
-    }
+
+    $args = @(
+        'search',
+        '--source', $DefaultWingetSource,
+        '--accept-source-agreements',
+        '--disable-interactivity',
+        '--count', [string]$Count,
+        '--query', $trimmedQuery
+    )
 
     $result = Start-WingetProcess -Arguments $args -CaptureOutput -FriendlyName 'repository search'
+    $allText = $result.StdOut + "`n" + $result.StdErr
+    $items = @(ConvertFrom-WingetSearchOutput -Text $allText)
 
-    $items = ConvertFrom-WingetSearchOutput -Text ($result.StdOut + "`n" + $result.StdErr)
-
-    if ($result.ExitCode -ne 0 -and $items.Count -eq 0 -and (($result.StdOut + $result.StdErr) -notmatch '(?i)No package found')) {
+    if ($result.ExitCode -ne 0 -and $items.Count -eq 0 -and ($allText -notmatch '(?i)No package found')) {
         throw "winget search failed with exit code $($result.ExitCode)."
     }
 
-    return $items
-}
-
-function Get-RepositorySearchTermsFromText {
-    param([string]$Text)
-
-    $terms = @(
-        $Text -split "`r?`n|;" |
-        ForEach-Object { $_.Trim() } |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-    )
-
-    if (-not $terms.Count) {
-        return @('')
-    }
-
-    return @($terms | Select-Object -Unique)
-}
-
-function Search-WingetRepositoryMulti {
-    param([Parameter(Mandatory = $true)][string[]]$Queries)
-
-    $results = New-Object System.Collections.Generic.List[WingetPackageItem]
-    $seen = @{}
-    $queryCount = [Math]::Max(1, $Queries.Count)
-    $perQueryLimit = [Math]::Max(8, [Math]::Ceiling($SearchResultLimit / $queryCount))
-
-    foreach ($query in $Queries) {
-        $label = if ([string]::IsNullOrWhiteSpace($query)) { '<browse>' } else { $query }
-        Write-Log ("Repository sub-search: '{0}' (limit {1})" -f $label, $perQueryLimit) 'DEBUG'
-
-        foreach ($item in @(Search-WingetRepository -Query $query -Count $perQueryLimit)) {
-            $key = Get-PackageKey -Package $item
-            if (-not $seen.ContainsKey($key)) {
-                $seen[$key] = $true
-                [void]$results.Add($item)
-                if ($results.Count -ge $SearchResultLimit) {
-                    break
-                }
-            }
-        }
-
-        if ($results.Count -ge $SearchResultLimit) {
-            break
-        }
-    }
-
-    return @($results.ToArray())
+    return @($items)
 }
 
 function Resolve-PackageInstallIdentity {
@@ -630,7 +622,8 @@ function Resolve-PackageInstallIdentity {
     }
 
     try {
-        $matches = Search-WingetRepository -Query $Package.Name | Where-Object { $_.Name -eq $Package.Name }
+        $matches = @(Search-WingetRepository -Query $Package.Name | Where-Object { $_.Name -eq $Package.Name })
+
         if ($matches.Count -eq 1 -and $matches[0].Id -and $matches[0].Id -notmatch '[…]{1}|\.\.\.$') {
             return [pscustomobject]@{ Mode = 'Id'; Value = $matches[0].Id }
         }
@@ -807,7 +800,10 @@ function Get-WingetUpgradeablePackages {
 }
 
 function Invoke-WingetUpdateAll {
-    param([bool]$Silent)
+    param(
+        [bool]$Silent,
+        [scriptblock]$ProgressCallback
+    )
 
     $packages = @(Get-WingetUpgradeablePackages)
     Write-Log ("Upgradeable package count: {0}" -f $packages.Count)
@@ -821,6 +817,10 @@ function Invoke-WingetUpdateAll {
     $failureCount = 0
 
     foreach ($package in $packages) {
+        if ($ProgressCallback) {
+            & $ProgressCallback ("Upgrading {0}..." -f $package.Name)
+        }
+
         $wingetLog = New-WingetLogPath -Prefix 'upgrade'
         $args = @(
             'upgrade',
@@ -952,8 +952,9 @@ $Xaml = @"
             <Setter Property="Background" Value="{StaticResource PanelBrushSoft}"/>
             <Setter Property="BorderBrush" Value="{StaticResource PanelBorderBrush}"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="16,10"/>
+            <Setter Property="Padding" Value="18,8"/>
             <Setter Property="Margin" Value="0,0,10,0"/>
+            <Setter Property="MinHeight" Value="34"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
@@ -962,8 +963,13 @@ $Xaml = @"
                                 Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}"
                                 BorderThickness="{TemplateBinding BorderThickness}"
-                                CornerRadius="12">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                CornerRadius="12"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter
+                                Margin="{TemplateBinding Padding}"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                RecognizesAccessKey="True"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
@@ -1085,168 +1091,244 @@ $Xaml = @"
         </Style>
     </Window.Resources>
 
-    <Grid Margin="22">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
+    <Grid>
+        <Grid x:Name="MainContent" Margin="22">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
 
-        <Border Grid.Row="0" Style="{StaticResource CardBorderStyle}" Padding="22" Margin="0,0,0,18">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-
-                <StackPanel Grid.Column="0">
-                    <TextBlock Text="$AppTitle" FontSize="26" FontWeight="SemiBold"/>
-                    <TextBlock Margin="0,6,0,0" Text="Version 2.0 (April 2026)" Foreground="{StaticResource TextMutedBrush}" FontSize="13"/>
-                    <TextBlock Margin="0,8,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="12" x:Name="TxtLogPath"/>
-                </StackPanel>
-
-                <Border Grid.Column="1" Background="#0F1D2E" BorderBrush="#23314A" BorderThickness="1" CornerRadius="12" Padding="14,10" HorizontalAlignment="Right">
-                    <StackPanel>
-                        <TextBlock Text="Current selection" Foreground="{StaticResource TextMutedBrush}" FontSize="12"/>
-                        <TextBlock x:Name="TxtCommonCount" Text="0 apps" FontSize="18" FontWeight="SemiBold"/>
-                    </StackPanel>
-                </Border>
-            </Grid>
-        </Border>
-
-        <Grid Grid.Row="1">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="1.05*"/>
-                <ColumnDefinition Width="18"/>
-                <ColumnDefinition Width="1.35*"/>
-            </Grid.ColumnDefinitions>
-
-            <Border Grid.Column="0" Style="{StaticResource CardBorderStyle}">
+            <Border Grid.Row="0" Style="{StaticResource CardBorderStyle}" Padding="22" Margin="0,0,0,18">
                 <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
-                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
 
-                    <StackPanel Grid.Row="0" Margin="0,0,0,14">
-                        <TextBlock Text="Current selection" FontSize="20" FontWeight="SemiBold"/>
-                        <TextBlock Margin="0,4,0,0" Text="Checked apps stay here across searches. Uncheck an item to remove it from the install basket." Foreground="{StaticResource TextMutedBrush}" FontSize="12"/>
+                    <StackPanel Grid.Column="0">
+                        <TextBlock Text="$AppTitle" FontSize="26" FontWeight="SemiBold"/>
+                        <TextBlock Margin="0,6,0,0" Text="Version 2.0 (April 2026)" Foreground="{StaticResource TextMutedBrush}" FontSize="13"/>
+                        <TextBlock Margin="0,8,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="12" x:Name="TxtLogPath"/>
                     </StackPanel>
 
-                    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,14">
-                        <Button x:Name="BtnSelectAllCommon" Content="Select results"/>
-                        <Button x:Name="BtnClearAllCommon" Content="Clear selection"/>
-                        <Button x:Name="BtnRefreshCommon" Content="Show common apps"/>
-                    </StackPanel>
-
-                    <ListView x:Name="LvCommon" Grid.Row="2" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-                        <ListView.ItemTemplate>
-                            <DataTemplate>
-                                <Grid>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto"/>
-                                        <ColumnDefinition Width="*"/>
-                                    </Grid.ColumnDefinitions>
-                                    <CheckBox Grid.Column="0" IsChecked="{Binding Selected, Mode=TwoWay}" Margin="0,0,14,0" VerticalAlignment="Center"/>
-                                    <StackPanel Grid.Column="1">
-                                        <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-                                        <TextBlock Margin="0,4,0,0" Text="{Binding Id}" Foreground="{StaticResource TextMutedBrush}" FontSize="12" TextTrimming="CharacterEllipsis"/>
-                                    </StackPanel>
-                                </Grid>
-                            </DataTemplate>
-                        </ListView.ItemTemplate>
-                    </ListView>
+                    <Border Grid.Column="1" Background="#0F1D2E" BorderBrush="#23314A" BorderThickness="1" CornerRadius="12" Padding="14,10" HorizontalAlignment="Right">
+                        <StackPanel>
+                            <TextBlock Text="Current selection" Foreground="{StaticResource TextMutedBrush}" FontSize="12"/>
+                            <TextBlock x:Name="TxtCommonCount" Text="0 apps" FontSize="18" FontWeight="SemiBold"/>
+                        </StackPanel>
+                    </Border>
                 </Grid>
             </Border>
 
-            <Border Grid.Column="2" Style="{StaticResource CardBorderStyle}">
+            <Grid Grid.Row="1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="1.05*"/>
+                    <ColumnDefinition Width="18"/>
+                    <ColumnDefinition Width="1.35*"/>
+                </Grid.ColumnDefinitions>
+
+                <Border Grid.Column="0" Style="{StaticResource CardBorderStyle}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Grid.Row="0" Margin="0,0,0,14">
+                            <TextBlock Text="Current selection" FontSize="20" FontWeight="SemiBold"/>
+                            <TextBlock Margin="0,4,0,0" Text="Checked apps stay here across searches. Uncheck an item to remove it from the install basket." Foreground="{StaticResource TextMutedBrush}" FontSize="12"/>
+                        </StackPanel>
+
+                        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,14">
+                            <Button x:Name="BtnSelectAllCommon" Content="Select results"/>
+                            <Button x:Name="BtnClearAllCommon" Content="Clear selection"/>
+                            <Button x:Name="BtnRefreshCommon" Content="Show common apps"/>
+                        </StackPanel>
+
+                        <ListView x:Name="LvCommon" Grid.Row="2" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <CheckBox Grid.Column="0" IsChecked="{Binding Selected, Mode=TwoWay}" Margin="0,0,14,0" VerticalAlignment="Center"/>
+                                        <StackPanel Grid.Column="1">
+                                            <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                            <TextBlock Margin="0,4,0,0" Text="{Binding Id}" Foreground="{StaticResource TextMutedBrush}" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                                        </StackPanel>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                    </Grid>
+                </Border>
+
+                <Border Grid.Column="2" Style="{StaticResource CardBorderStyle}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Grid.Row="0" Margin="0,0,0,14">
+                            <TextBlock Text="Search repository" FontSize="20" FontWeight="SemiBold"/>
+                            <TextBlock Margin="0,4,0,0"
+                                    Text="Search the winget source by package name or ID."
+                                    Foreground="{StaticResource TextMutedBrush}"
+                                    FontSize="12"/>
+                        </StackPanel>
+
+                        <Grid Grid.Row="1" Margin="0,0,0,14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+
+                            <TextBox x:Name="TxtSearch"
+                                    Grid.Column="0"
+                                    MinWidth="320"
+                                    Height="38"
+                                    AcceptsReturn="False"
+                                    TextWrapping="NoWrap"
+                                    VerticalContentAlignment="Center"
+                                    VerticalScrollBarVisibility="Disabled"
+                                    HorizontalScrollBarVisibility="Auto"
+                                    ToolTip="$RepositorySearchHint"/>
+
+                            <Button x:Name="BtnSearch"
+                                    Grid.Column="1"
+                                    Content="Search"
+                                    Margin="12,0,0,0"/>
+
+                            <Button x:Name="BtnClearSearch"
+                                    Grid.Column="2"
+                                    Content="Show startup apps"
+                                    Margin="12,0,0,0"/>
+                        </Grid>
+
+                        <ListView x:Name="LvSearch" Grid.Row="2" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="2.6*"/>
+                                            <ColumnDefinition Width="1.8*"/>
+                                            <ColumnDefinition Width="0.9*"/>
+                                            <ColumnDefinition Width="0.9*"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <CheckBox Grid.Column="0" IsChecked="{Binding Selected, Mode=TwoWay}" Margin="0,0,14,0" VerticalAlignment="Center"/>
+                                        <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="13" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                        <TextBlock Grid.Column="2" Text="{Binding Id}" FontSize="12" Foreground="{StaticResource TextMutedBrush}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                                        <TextBlock Grid.Column="3" Text="{Binding Version}" FontSize="12" Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                                        <TextBlock Grid.Column="4" Text="{Binding Source}" FontSize="12" Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                    </Grid>
+                </Border>
+            </Grid>
+
+            <Border Grid.Row="2" Style="{StaticResource CardBorderStyle}" Margin="0,2,0,0">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
 
-                    <StackPanel Grid.Row="0" Margin="0,0,0,14">
-                        <TextBlock Text="Search repository" FontSize="20" FontWeight="SemiBold"/>
-                        <TextBlock Margin="0,4,0,0" Text="Search the winget source directly. Enter one term per line. Leave it empty to browse a capped result set." Foreground="{StaticResource TextMutedBrush}" FontSize="12"/>
-                    </StackPanel>
-
-                    <Grid Grid.Row="1" Margin="0,0,0,14">
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                        </Grid.RowDefinitions>
+                    <Grid Grid.Row="0" Margin="0,0,0,14">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <TextBox x:Name="TxtSearch" Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="3" MinWidth="320" Height="110" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" ToolTip="$RepositorySearchHint"/>
-                        <Button x:Name="BtnSearch" Grid.Row="1" Grid.Column="1" Content="Search" Margin="12,12,0,0"/>
-                        <Button x:Name="BtnClearSearch" Grid.Row="1" Grid.Column="2" Content="Show startup apps" Margin="12,12,0,0"/>
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                            <CheckBox x:Name="ChkSilent" Content="Silent installation" IsChecked="$DefaultSilentInstall" Margin="0,0,20,0"/>
+                            <TextBlock x:Name="LblSelectedCount" Text="0 selected" VerticalAlignment="Center" Foreground="{StaticResource TextMutedBrush}" FontSize="12"/>
+                        </StackPanel>
+
+                        <Button x:Name="BtnOpenLogs" Grid.Column="1" Content="Open log folder"/>
+                        <Button x:Name="BtnInstall" Grid.Column="2" Content="Install selected"/>
+                        <Button x:Name="BtnUpdateAll" Grid.Column="3" Content="Update all installed packages" Visibility="Visible"/>
+                        <Button x:Name="BtnClose" Grid.Column="4" Content="Close" Margin="0,0,0,0"/>
                     </Grid>
 
-                    <ListView x:Name="LvSearch" Grid.Row="2" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-                        <ListView.ItemTemplate>
-                            <DataTemplate>
-                                <Grid>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto"/>
-                                        <ColumnDefinition Width="2.6*"/>
-                                        <ColumnDefinition Width="1.8*"/>
-                                        <ColumnDefinition Width="0.9*"/>
-                                        <ColumnDefinition Width="0.9*"/>
-                                    </Grid.ColumnDefinitions>
-
-                                    <CheckBox Grid.Column="0" IsChecked="{Binding Selected, Mode=TwoWay}" Margin="0,0,14,0" VerticalAlignment="Center"/>
-                                    <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="13" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-                                    <TextBlock Grid.Column="2" Text="{Binding Id}" FontSize="12" Foreground="{StaticResource TextMutedBrush}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="12,0,0,0"/>
-                                    <TextBlock Grid.Column="3" Text="{Binding Version}" FontSize="12" Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center" Margin="12,0,0,0"/>
-                                    <TextBlock Grid.Column="4" Text="{Binding Source}" FontSize="12" Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center" Margin="12,0,0,0"/>
-                                </Grid>
-                            </DataTemplate>
-                        </ListView.ItemTemplate>
-                    </ListView>
+                    <StackPanel Grid.Row="1">
+                        <TextBlock x:Name="LblStatus" Text="Ready" Foreground="{StaticResource TextMutedBrush}" FontSize="12" Margin="0,0,0,8"/>
+                        <ProgressBar x:Name="ProgressBar" Minimum="0" Maximum="100" Value="0"/>
+                    </StackPanel>
                 </Grid>
             </Border>
         </Grid>
 
-        <Border Grid.Row="2" Style="{StaticResource CardBorderStyle}" Margin="0,2,0,0">
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
-                </Grid.RowDefinitions>
+        <Grid x:Name="BusyOverlay"
+              Visibility="Collapsed"
+              IsHitTestVisible="False"
+              Background="#8C0B1118"
+              Panel.ZIndex="999">
 
-                <Grid Grid.Row="0" Margin="0,0,0,14">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
+            <Border Width="300"
+                    Padding="24"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Background="#E6111827"
+                    BorderBrush="#2B3950"
+                    BorderThickness="1"
+                    CornerRadius="20">
+                <StackPanel HorizontalAlignment="Center">
+                    <Ellipse Width="56"
+                             Height="56"
+                             Stroke="{StaticResource AccentBrush}"
+                             StrokeThickness="5"
+                             StrokeDashArray="1 2"
+                             StrokeDashCap="Round"
+                             HorizontalAlignment="Center"
+                             RenderTransformOrigin="0.5,0.5">
+                        <Ellipse.RenderTransform>
+                            <RotateTransform Angle="0"/>
+                        </Ellipse.RenderTransform>
+                        <Ellipse.Triggers>
+                            <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+                                <BeginStoryboard>
+                                    <Storyboard RepeatBehavior="Forever">
+                                        <DoubleAnimation
+                                            Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                            From="0"
+                                            To="360"
+                                            Duration="0:0:1"/>
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </EventTrigger>
+                        </Ellipse.Triggers>
+                    </Ellipse>
 
-                    <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                        <CheckBox x:Name="ChkSilent" Content="Silent installation" IsChecked="$DefaultSilentInstall" Margin="0,0,20,0"/>
-                        <TextBlock x:Name="LblSelectedCount" Text="0 selected" VerticalAlignment="Center" Foreground="{StaticResource TextMutedBrush}" FontSize="12"/>
-                    </StackPanel>
+                    <TextBlock Text="Please wait"
+                               Margin="0,16,0,6"
+                               FontSize="18"
+                               FontWeight="SemiBold"
+                               HorizontalAlignment="Center"/>
 
-                    <Button x:Name="BtnOpenLogs" Grid.Column="1" Content="Open log folder"/>
-                    <Button x:Name="BtnInstall" Grid.Column="2" Content="Install selected"/>
-                    <Button x:Name="BtnUpdateAll" Grid.Column="3" Content="Update all installed packages" Visibility="Visible"/>
-                    <Button x:Name="BtnClose" Grid.Column="4" Content="Close" Margin="0,0,0,0"/>
-                </Grid>
-
-                <StackPanel Grid.Row="1">
-                    <TextBlock x:Name="LblStatus" Text="Ready" Foreground="{StaticResource TextMutedBrush}" FontSize="12" Margin="0,0,0,8"/>
-                    <ProgressBar x:Name="ProgressBar" Minimum="0" Maximum="100" Value="0"/>
+                    <TextBlock x:Name="BusyOverlayMessage"
+                               Text="Working..."
+                               FontSize="12"
+                               Foreground="{StaticResource TextMutedBrush}"
+                               TextAlignment="Center"
+                               TextWrapping="Wrap"
+                               HorizontalAlignment="Center"/>
                 </StackPanel>
-            </Grid>
-        </Border>
+            </Border>
+        </Grid>
     </Grid>
 </Window>
 "@
@@ -1273,6 +1355,8 @@ $script:BtnUpdateAll = $script:Window.FindName('BtnUpdateAll')
 $script:BtnClose = $script:Window.FindName('BtnClose')
 $script:LblStatus = $script:Window.FindName('LblStatus')
 $script:ProgressBar = $script:Window.FindName('ProgressBar')
+$script:BusyOverlay = $script:Window.FindName('BusyOverlay')
+$script:BusyOverlayMessage = $script:Window.FindName('BusyOverlayMessage')
 
 if (-not $IncludeUpdateAllButton) {
     $script:BtnUpdateAll.Visibility = 'Collapsed'
@@ -1281,7 +1365,7 @@ if (-not $IncludeUpdateAllButton) {
 $script:TxtLogPath.Text = "by zorrouraganu | Log: $script:LogPath"
 $script:LvCommon.ItemsSource = $script:SelectedPackages
 $script:LvSearch.ItemsSource = $script:ResultPackages
-$script:TxtSearch.Text = $StartupSearchText
+$script:TxtSearch.Text = ""
 #endregion
 
 #region UI actions
@@ -1324,18 +1408,36 @@ function Invoke-RepositorySearchFromUi {
         return
     }
 
-    $query = $script:TxtSearch.Text
-    $terms = @(Get-RepositorySearchTermsFromText -Text $query)
+    $query = [string]$script:TxtSearch.Text
+    $query = $query.Trim()
+
+    if ([string]::IsNullOrWhiteSpace($query)) {
+        $script:LblStatus.Text = 'Enter a package name or ID to search.'
+        [System.Windows.MessageBox]::Show(
+            'Enter a package name or ID to search.',
+            $AppTitle,
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        ) | Out-Null
+        $script:TxtSearch.Focus()
+        return
+    }
 
     try {
         Set-UiBusy -Busy $true -StatusText 'Searching repository...'
-        Write-Log ("Repository search triggered. Terms: {0}" -f (($terms | ForEach-Object { if ([string]::IsNullOrWhiteSpace($_)) { '<browse>' } else { $_ } }) -join ' | '))
+        Write-Log ("Repository search triggered. Query: {0}" -f $query)
 
-        $results = Search-WingetRepositoryMulti -Queries $terms
+        $results = @(Search-WingetRepository -Query $query -Count $SearchResultLimit)
         Set-ResultPackages -Items $results
 
-        $script:LblStatus.Text = ('Search complete. {0} result(s).' -f $script:ResultPackages.Count)
-        Write-Log ("Repository search complete. Results: {0}" -f $script:ResultPackages.Count) 'SUCCESS'
+        if ($results.Count -gt 0) {
+            $script:LblStatus.Text = ('Search complete. {0} result(s).' -f $results.Count)
+            Write-Log ("Repository search complete. Results: {0}" -f $results.Count) 'SUCCESS'
+        }
+        else {
+            $script:LblStatus.Text = 'No packages found.'
+            Write-Log ("Repository search returned no results for query: {0}" -f $query) 'INFO'
+        }
     }
     catch {
         $script:LblStatus.Text = 'Search failed.'
@@ -1381,8 +1483,7 @@ function Invoke-InstallSelectedFromUi {
         Write-Log ("Install triggered. Package count: {0}. Silent: {1}" -f $selected.Count, $silent)
 
         foreach ($package in $selected) {
-            $script:LblStatus.Text = ('Installing {0}...' -f $package.Name)
-            $script:Window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
+            Set-BusyMessage ('Installing {0}...' -f $package.Name)
 
             if (Install-PackageSelection -Package $package -Silent $silent) {
                 $successCount++
@@ -1436,7 +1537,10 @@ function Invoke-UpdateAllFromUi {
         Set-UiBusy -Busy $true -StatusText 'Enumerating and upgrading installed packages... (This operation can take a long time, be patient.)'
         Write-Log ("Update-all triggered. Silent: {0}" -f $silent)
 
-        $ok = Invoke-WingetUpdateAll -Silent $silent
+        $ok = Invoke-WingetUpdateAll -Silent $silent -ProgressCallback {
+            param($message)
+            Set-BusyMessage $message
+        }
         $script:LblStatus.Text = if ($ok) { 'Update all completed successfully.' } else { 'Update all finished with errors.' }
     }
     catch {
@@ -1481,14 +1585,24 @@ $selectionTimer.Add_Tick({ Sync-SelectedPackages; Refresh-CommonSummary; Refresh
 $selectionTimer.Start()
 
 $script:Window.Add_SourceInitialized({ Set-ModernWindowChrome -Window $script:Window })
-$script:Window.Add_Closing({ Write-Log 'Window closing. Session ended.' 'INFO' })
+$script:Window.Add_Closing({
+    param($sender, $eventArgs)
+
+    if ($script:IsBusy) {
+        $eventArgs.Cancel = $true
+        Write-Log 'Close request ignored because an operation is still in progress.' 'WARN'
+        return
+    }
+
+    Write-Log 'Window closing. Session ended.' 'INFO'
+})
 #endregion
 
 #region Launch
 Set-ResultPackages -Items (Get-StartupCatalogPackages)
 Refresh-CommonSummary
 Refresh-SelectionSummary
-$script:LblStatus.Text = 'Ready - startup catalog loaded.'
+$script:LblStatus.Text = 'Ready.'
 
 if (-not (Ensure-Winget)) {
     Write-Log 'Launching UI without a working winget backend.' 'WARN'
