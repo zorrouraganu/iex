@@ -1,7 +1,7 @@
 #-----------------------------------------------------------------------------HEADER-------------------------------------------------------------------------------
 # File : wiGUI.ps1
 # Author : zorrouraganu	
-# Version : 2.0.0
+# Version : 2.1.0
 # Description : WinGet GUI that allows easy install of multiple apps 
 #
 # Version History:
@@ -10,6 +10,7 @@
 # -----------------------------------------------------------------------------------------------------------------------------------------------------------------
 # 1.0		June 2025			zorrouraganu        		Creation of script
 # 2.0		April 2026			zorrouraganu        		Complete rework
+# 2.1       April 2026          zorrouraganu                Bug fixes & improvements
 # 
 #-----------------------------------------------------------------------------HEADER-------------------------------------------------------------------------------
 
@@ -1108,7 +1109,7 @@ $Xaml = @"
 
                     <StackPanel Grid.Column="0">
                         <TextBlock Text="$AppTitle" FontSize="26" FontWeight="SemiBold"/>
-                        <TextBlock Margin="0,6,0,0" Text="Version 2.0 (April 2026)" Foreground="{StaticResource TextMutedBrush}" FontSize="13"/>
+                        <TextBlock Margin="0,6,0,0" Text="Version 2.1 (April 2026)" Foreground="{StaticResource TextMutedBrush}" FontSize="13"/>
                         <TextBlock Margin="0,8,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="12" x:Name="TxtLogPath"/>
                     </StackPanel>
 
