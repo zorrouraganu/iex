@@ -1,7 +1,7 @@
 #-----------------------------------------------------------------------------HEADER-------------------------------------------------------------------------------
 # File : wiGUI.ps1
 # Author : zorrouraganu	
-# Version : 2.1.0
+# Version : 2.2.0
 # Description : WinGet GUI that allows easy install of multiple apps 
 #
 # Version History:
@@ -11,6 +11,8 @@
 # 1.0		June 2025			zorrouraganu        		Creation of script
 # 2.0		April 2026			zorrouraganu        		Complete rework
 # 2.1       April 2026          zorrouraganu                Bug fixes & improvements
+# 2.2       April 2026          zorrouraganu                Async busy operations so progress spinner animates
+#                                                           UI improvements
 # 
 #-----------------------------------------------------------------------------HEADER-------------------------------------------------------------------------------
 
@@ -56,8 +58,9 @@ Add-Type -AssemblyName System.Xaml
 $script:LogRoot = Join-Path -Path $env:LOCALAPPDATA -ChildPath ("Temp\{0}" -f $LogFolderName)
 $null = New-Item -Path $script:LogRoot -ItemType Directory -Force
 $script:SessionStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-$script:LogPath = Join-Path -Path $script:LogRoot -ChildPath ("WinGetGui_{0}.log" -f $script:SessionStamp)
+$script:LogPath = Join-Path -Path $script:LogRoot -ChildPath ("wiGUI_{0}.log" -f $script:SessionStamp)
 $script:IsBusy = $false
+$script:ActiveWingetOperations = New-Object System.Collections.ArrayList
 
 function Write-Log {
     param(
@@ -133,7 +136,42 @@ function Set-BusyMessage {
     $script:Window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
 }
 
+function Invoke-LogRetentionCleanup {
+    param([int]$RetentionDays = 7)
+
+    if (-not (Test-Path -LiteralPath $script:LogRoot)) {
+        return
+    }
+
+    $cutoff = (Get-Date).AddDays(-1 * [Math]::Abs($RetentionDays))
+    $removedCount = 0
+
+    try {
+        $staleLogFiles = Get-ChildItem -LiteralPath $script:LogRoot -File -Filter '*.log' -ErrorAction Stop |
+            Where-Object { $_.LastWriteTime -lt $cutoff -and $_.FullName -ne $script:LogPath }
+    }
+    catch {
+        Write-Log ("Failed to enumerate old log files in '{0}': {1}" -f $script:LogRoot, $_.Exception.Message) 'WARN'
+        return
+    }
+
+    foreach ($staleLogFile in $staleLogFiles) {
+        try {
+            Remove-Item -LiteralPath $staleLogFile.FullName -Force -ErrorAction Stop
+            $removedCount++
+        }
+        catch {
+            Write-Log ("Failed to remove old log file '{0}': {1}" -f $staleLogFile.FullName, $_.Exception.Message) 'WARN'
+        }
+    }
+
+    if ($removedCount -gt 0) {
+        Write-Log ("Removed {0} old log file(s) older than {1} day(s) from {2}" -f $removedCount, [Math]::Abs($RetentionDays), $script:LogRoot) 'INFO'
+    }
+}
+
 Write-Log "Session started. Log file: $script:LogPath"
+Invoke-LogRetentionCleanup -RetentionDays 7
 #endregion
 
 #region Native styling
@@ -432,6 +470,71 @@ function ConvertTo-CommandLineArgumentString {
     return [string]::Join(' ', $quotedArguments)
 }
 
+function Get-WingetProcessResult {
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)][string]$StdOutPath,
+        [Parameter(Mandatory = $true)][string]$StdErrPath,
+        [switch]$StreamToLog
+    )
+
+    try {
+        $null = $Process.WaitForExit()
+    }
+    catch {}
+
+    try {
+        $Process.Refresh()
+    }
+    catch {}
+
+    $stdOut = if (Test-Path -LiteralPath $StdOutPath) { [System.IO.File]::ReadAllText($StdOutPath) } else { '' }
+    $stdErr = if (Test-Path -LiteralPath $StdErrPath) { [System.IO.File]::ReadAllText($StdErrPath) } else { '' }
+
+    if ($StreamToLog) {
+        foreach ($line in ($stdOut -split "`r?`n")) {
+            if (-not [string]::IsNullOrWhiteSpace($line)) {
+                Write-Log $line.Trim() 'INFO'
+            }
+        }
+
+        foreach ($line in ($stdErr -split "`r?`n")) {
+            if (-not [string]::IsNullOrWhiteSpace($line)) {
+                Write-Log $line.Trim() 'WARN'
+            }
+        }
+    }
+    elseif ($stdErr) {
+        foreach ($line in ($stdErr -split "`r?`n")) {
+            if (-not [string]::IsNullOrWhiteSpace($line)) {
+                Write-Log $line.Trim() 'DEBUG'
+            }
+        }
+    }
+
+    $exitCode = $null
+
+    try {
+        $exitCode = [int]$Process.ExitCode
+    }
+    catch {
+        try {
+            $Process.Refresh()
+            $exitCode = [int]$Process.ExitCode
+        }
+        catch {}
+    }
+
+    try { Remove-Item -LiteralPath $StdOutPath -Force -ErrorAction SilentlyContinue } catch {}
+    try { Remove-Item -LiteralPath $StdErrPath -Force -ErrorAction SilentlyContinue } catch {}
+
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        StdOut   = $stdOut
+        StdErr   = $stdErr
+    }
+}
+
 function Start-WingetProcess {
     param(
         [Parameter(Mandatory = $true)][string[]]$Arguments,
@@ -460,38 +563,98 @@ function Start-WingetProcess {
         throw "Failed to launch winget.exe: $($_.Exception.Message)"
     }
 
-    $stdOut = if (Test-Path -LiteralPath $stdOutPath) { [System.IO.File]::ReadAllText($stdOutPath) } else { '' }
-    $stdErr = if (Test-Path -LiteralPath $stdErrPath) { [System.IO.File]::ReadAllText($stdErrPath) } else { '' }
+    return Get-WingetProcessResult -Process $process -StdOutPath $stdOutPath -StdErrPath $stdErrPath -StreamToLog:$StreamToLog
+}
 
-    if ($StreamToLog) {
-        foreach ($line in ($stdOut -split "`r?`n")) {
-            if (-not [string]::IsNullOrWhiteSpace($line)) {
-                Write-Log $line.Trim() 'INFO'
-            }
+function Start-WingetProcessAsync {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [switch]$CaptureOutput,
+        [switch]$StreamToLog,
+        [string]$FriendlyName = 'winget',
+        [Parameter(Mandatory = $true)][scriptblock]$OnCompleted
+    )
+
+    $argumentString = ConvertTo-CommandLineArgumentString -Arguments $Arguments
+    $stdOutPath = New-WingetLogPath -Prefix 'stdout'
+    $stdErrPath = New-WingetLogPath -Prefix 'stderr'
+    $activeWingetOperations = $script:ActiveWingetOperations
+    $writeLogFn = (Get-Command -Name 'Write-Log' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $getWingetProcessResultFn = (Get-Command -Name 'Get-WingetProcessResult' -CommandType Function -ErrorAction Stop).ScriptBlock
+
+    & $writeLogFn ("Starting {0}: winget {1}" -f $FriendlyName, $argumentString) 'INFO'
+
+    try {
+        $process = Start-Process `
+            -FilePath 'winget.exe' `
+            -ArgumentList $argumentString `
+            -RedirectStandardOutput $stdOutPath `
+            -RedirectStandardError $stdErrPath `
+            -PassThru `
+            -WindowStyle Hidden
+    }
+    catch {
+        & $OnCompleted $null $_.Exception
+        return
+    }
+
+    $timer = New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromMilliseconds(250)
+
+    $operation = [pscustomobject]@{
+        Process      = $process
+        Timer        = $timer
+        StdOutPath   = $stdOutPath
+        StdErrPath   = $stdErrPath
+        StreamToLog  = [bool]$StreamToLog
+        FriendlyName = $FriendlyName
+        OnCompleted  = $OnCompleted
+    }
+
+    if ($activeWingetOperations) {
+        [void]$activeWingetOperations.Add($operation)
+    }
+
+    $timer.Add_Tick({
+        $isExited = $false
+
+        try {
+            $isExited = $operation.Process.HasExited
+        }
+        catch {
+            $isExited = $true
         }
 
-        foreach ($line in ($stdErr -split "`r?`n")) {
-            if (-not [string]::IsNullOrWhiteSpace($line)) {
-                Write-Log $line.Trim() 'WARN'
+        if (-not $isExited) {
+            return
+        }
+
+        $operation.Timer.Stop()
+
+        $result = $null
+        $callbackError = $null
+
+        try {
+            $result = & $getWingetProcessResultFn -Process $operation.Process -StdOutPath $operation.StdOutPath -StdErrPath $operation.StdErrPath -StreamToLog:$operation.StreamToLog
+        }
+        catch {
+            $callbackError = $_.Exception
+        }
+
+        try {
+            & $operation.OnCompleted $result $callbackError
+        }
+        catch {
+            & $writeLogFn ("Unhandled async callback failure in {0}: {1}" -f $operation.FriendlyName, $_.Exception.Message) 'ERROR'
+        }
+        finally {
+            if ($activeWingetOperations) {
+                [void]$activeWingetOperations.Remove($operation)
             }
         }
-    }
-    elseif ($stdErr) {
-        foreach ($line in ($stdErr -split "`r?`n")) {
-            if (-not [string]::IsNullOrWhiteSpace($line)) {
-                Write-Log $line.Trim() 'DEBUG'
-            }
-        }
-    }
+    }.GetNewClosure())
 
-    try { Remove-Item -LiteralPath $stdOutPath -Force -ErrorAction SilentlyContinue } catch {}
-    try { Remove-Item -LiteralPath $stdErrPath -Force -ErrorAction SilentlyContinue } catch {}
-
-    return [pscustomobject]@{
-        ExitCode = $process.ExitCode
-        StdOut   = $stdOut
-        StdErr   = $stdErr
-    }
+    $timer.Start()
 }
 
 function ConvertFrom-WingetSearchOutput {
@@ -675,7 +838,7 @@ function Install-PackageSelection {
         return $true
     }
 
-    if (Test-WingetInstallNoOpSuccess -ExitCode $result.ExitCode) {
+    if (Test-WingetInstallNoOpSuccess -ExitCode $result.ExitCode -StdOut $result.StdOut -StdErr $result.StdErr) {
         Write-Log ("'{0}' is already installed and no applicable newer version is available. Treating as success." -f $Package.Name) 'SUCCESS'
         return $true
     }
@@ -903,11 +1066,22 @@ $script:WingetExit_UpdateNotApplicable = -1978335189
 
 function Test-WingetInstallNoOpSuccess {
     param(
-        [Parameter(Mandatory = $true)]
-        [int]$ExitCode
+        [AllowNull()]$ExitCode,
+        [string]$StdOut,
+        [string]$StdErr
     )
 
-    return ($ExitCode -eq $script:WingetExit_UpdateNotApplicable)
+    if ($null -ne $ExitCode -and "$ExitCode" -ne '') {
+        try {
+            if ([int]$ExitCode -eq $script:WingetExit_UpdateNotApplicable) {
+                return $true
+            }
+        }
+        catch {}
+    }
+
+    $combinedOutput = @($StdOut, $StdErr) -join "`n"
+    return ($combinedOutput -match '(?im)(No applicable update found|No applicable upgrade found|No available upgrade found|No newer package versions? are available)')
 }
 
 #endregion
@@ -991,11 +1165,15 @@ $Xaml = @"
 
         <Style TargetType="TextBox">
             <Setter Property="Foreground" Value="White"/>
-            <Setter Property="Background" Value="{StaticResource InputBrush}"/>
-            <Setter Property="BorderBrush" Value="{StaticResource PanelBorderBrush}"/>
-            <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="10,8"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="12,6"/>
             <Setter Property="Margin" Value="0,0,10,0"/>
+            <Setter Property="MinHeight" Value="34"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="CaretBrush" Value="White"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
         </Style>
 
         <Style TargetType="CheckBox">
@@ -1109,7 +1287,7 @@ $Xaml = @"
 
                     <StackPanel Grid.Column="0">
                         <TextBlock Text="$AppTitle" FontSize="26" FontWeight="SemiBold"/>
-                        <TextBlock Margin="0,6,0,0" Text="Version 2.1 (April 2026)" Foreground="{StaticResource TextMutedBrush}" FontSize="13"/>
+                        <TextBlock Margin="0,6,0,0" Text="Version 2.2 (April 2026)" Foreground="{StaticResource TextMutedBrush}" FontSize="13"/>
                         <TextBlock Margin="0,8,0,0" Foreground="{StaticResource TextMutedBrush}" FontSize="12" x:Name="TxtLogPath"/>
                     </StackPanel>
 
@@ -1143,9 +1321,7 @@ $Xaml = @"
                         </StackPanel>
 
                         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,14">
-                            <Button x:Name="BtnSelectAllCommon" Content="Select results"/>
                             <Button x:Name="BtnClearAllCommon" Content="Clear selection"/>
-                            <Button x:Name="BtnRefreshCommon" Content="Show common apps"/>
                         </StackPanel>
 
                         <ListView x:Name="LvCommon" Grid.Row="2" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
@@ -1191,16 +1367,24 @@ $Xaml = @"
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
 
-                            <TextBox x:Name="TxtSearch"
-                                    Grid.Column="0"
+                            <Border Grid.Column="0"
                                     MinWidth="320"
-                                    Height="38"
-                                    AcceptsReturn="False"
-                                    TextWrapping="NoWrap"
-                                    VerticalContentAlignment="Center"
-                                    VerticalScrollBarVisibility="Disabled"
-                                    HorizontalScrollBarVisibility="Auto"
-                                    ToolTip="$RepositorySearchHint"/>
+                                    Height="34"
+                                    Margin="0,0,10,0"
+                                    Background="{StaticResource InputBrush}"
+                                    BorderBrush="{StaticResource PanelBorderBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="12"
+                                    SnapsToDevicePixels="True">
+                                <TextBox x:Name="TxtSearch"
+                                        Margin="0"
+                                        Height="34"
+                                        AcceptsReturn="False"
+                                        TextWrapping="NoWrap"
+                                        VerticalScrollBarVisibility="Disabled"
+                                        HorizontalScrollBarVisibility="Auto"
+                                        ToolTip="$RepositorySearchHint"/>
+                            </Border>
 
                             <Button x:Name="BtnSearch"
                                     Grid.Column="1"
@@ -1209,7 +1393,7 @@ $Xaml = @"
 
                             <Button x:Name="BtnClearSearch"
                                     Grid.Column="2"
-                                    Content="Show startup apps"
+                                    Content="Show common apps"
                                     Margin="12,0,0,0"/>
                         </Grid>
 
@@ -1341,13 +1525,10 @@ $script:TxtLogPath = $script:Window.FindName('TxtLogPath')
 $script:TxtCommonCount = $script:Window.FindName('TxtCommonCount')
 $script:LvCommon = $script:Window.FindName('LvCommon')
 $script:LvSearch = $script:Window.FindName('LvSearch')
-$script:BtnSelectAllCommon = $script:Window.FindName('BtnSelectAllCommon')
 $script:BtnClearAllCommon = $script:Window.FindName('BtnClearAllCommon')
-$script:BtnRefreshCommon = $script:Window.FindName('BtnRefreshCommon')
 $script:TxtSearch = $script:Window.FindName('TxtSearch')
 $script:BtnSearch = $script:Window.FindName('BtnSearch')
 $script:BtnClearSearch = $script:Window.FindName('BtnClearSearch')
-$script:BtnShowStartupApps = $script:BtnRefreshCommon
 $script:ChkSilent = $script:Window.FindName('ChkSilent')
 $script:LblSelectedCount = $script:Window.FindName('LblSelectedCount')
 $script:BtnOpenLogs = $script:Window.FindName('BtnOpenLogs')
@@ -1379,15 +1560,6 @@ function Refresh-CommonSummary {
     $script:TxtCommonCount.Text = ('{0} apps' -f $script:SelectedPackages.Count)
 }
 
-function Select-AllCommon {
-    foreach ($item in $script:ResultPackages) {
-        $item.Selected = $true
-    }
-    Sync-SelectedPackages
-    Refresh-CommonSummary
-    Refresh-SelectionSummary
-}
-
 function Clear-AllCommon {
     foreach ($item in @($script:SelectedPackages)) {
         $item.Selected = $false
@@ -1399,8 +1571,8 @@ function Clear-AllCommon {
 
 function Clear-SearchResults {
     Set-ResultPackages -Items (Get-StartupCatalogPackages)
-    $script:LblStatus.Text = 'Startup catalog loaded.'
-    Write-Log 'Startup catalog loaded into results panel.' 'DEBUG'
+    $script:LblStatus.Text = 'Common apps loaded.'
+    Write-Log 'Common apps loaded into results panel.' 'DEBUG'
 }
 
 
@@ -1424,38 +1596,388 @@ function Invoke-RepositorySearchFromUi {
         return
     }
 
+    Set-UiBusy -Busy $true -StatusText 'Searching repository...'
+    Write-Log ("Repository search triggered. Query: {0}" -f $query)
+
+    $args = @(
+        'search',
+        '--source', $DefaultWingetSource,
+        '--accept-source-agreements',
+        '--disable-interactivity',
+        '--count', [string]$SearchResultLimit,
+        '--query', $query
+    )
+
+    $convertFromWingetSearchOutputFn = (Get-Command -Name 'ConvertFrom-WingetSearchOutput' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $setResultPackagesFn = (Get-Command -Name 'Set-ResultPackages' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $setUiBusyFn = (Get-Command -Name 'Set-UiBusy' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $syncSelectedPackagesFn = (Get-Command -Name 'Sync-SelectedPackages' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $refreshCommonSummaryFn = (Get-Command -Name 'Refresh-CommonSummary' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $refreshSelectionSummaryFn = (Get-Command -Name 'Refresh-SelectionSummary' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $writeLogFn = (Get-Command -Name 'Write-Log' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $lblStatus = $script:LblStatus
+    $logPath = $script:LogPath
+    $appTitleLocal = $AppTitle
+    $searchQuery = $query
+
+    Start-WingetProcessAsync -Arguments $args -CaptureOutput -FriendlyName 'repository search' -OnCompleted ({
+        param($result, $callbackError)
+
+        try {
+            if ($callbackError) {
+                throw $callbackError
+            }
+
+            $allText = $result.StdOut + "`n" + $result.StdErr
+            $results = @(& $convertFromWingetSearchOutputFn -Text $allText)
+
+            if ($result.ExitCode -ne 0 -and $results.Count -eq 0 -and ($allText -notmatch '(?i)No package found')) {
+                throw "winget search failed with exit code $($result.ExitCode)."
+            }
+
+            & $setResultPackagesFn -Items $results
+
+            if ($results.Count -gt 0) {
+                $lblStatus.Text = ('Search complete. {0} result(s).' -f $results.Count)
+                & $writeLogFn ("Repository search complete. Results: {0}" -f $results.Count) 'SUCCESS'
+            }
+            else {
+                $lblStatus.Text = 'No packages found.'
+                & $writeLogFn ("Repository search returned no results for query: {0}" -f $searchQuery) 'INFO'
+            }
+        }
+        catch {
+            $lblStatus.Text = 'Search failed.'
+            & $writeLogFn "Repository search failed: $($_.Exception.Message)" 'ERROR'
+            [System.Windows.MessageBox]::Show(
+                "Search failed.`n`n$($_.Exception.Message)`n`nLog: $logPath",
+                $appTitleLocal,
+                [System.Windows.MessageBoxButton]::OK,
+                [System.Windows.MessageBoxImage]::Error
+            ) | Out-Null
+        }
+        finally {
+            & $setUiBusyFn -Busy $false -StatusText $lblStatus.Text
+            & $syncSelectedPackagesFn
+            & $refreshCommonSummaryFn
+            & $refreshSelectionSummaryFn
+        }
+    }.GetNewClosure())
+}
+
+function New-InstallPackageInvocation {
+    param(
+        [Parameter(Mandatory = $true)]$Package,
+        [bool]$Silent
+    )
+
+    $resolved = Resolve-PackageInstallIdentity -Package $Package
+    $wingetLog = New-WingetLogPath -Prefix 'install'
+
+    $args = @(
+        'install',
+        '--source', ($(if ([string]::IsNullOrWhiteSpace([string]$Package.Source)) { $DefaultWingetSource } else { [string]$Package.Source })),
+        '--accept-source-agreements',
+        '--accept-package-agreements',
+        '--log', $wingetLog
+    )
+
+    if ($resolved.Mode -eq 'Id') {
+        $args += @('--id', $resolved.Value, '--exact')
+    }
+    else {
+        $args += @('--name', $resolved.Value, '--exact')
+    }
+
+    if ($Silent) {
+        $args += '--silent'
+    }
+    else {
+        $args += '--interactive'
+    }
+
+    Write-Log ("Installing '{0}' using {1} '{2}'. Native winget log: {3}" -f $Package.Name, $resolved.Mode, $resolved.Value, $wingetLog)
+
+    return [pscustomobject]@{
+        Arguments    = $args
+        FriendlyName = ('install {0}' -f $Package.Name)
+        Package      = $Package
+    }
+}
+
+function Complete-InstallSelectedOperation {
+    param(
+        [string]$StatusText,
+        [string]$StatusLevel = 'INFO'
+    )
+
+    $script:LblStatus.Text = $StatusText
+    Write-Log $StatusText $StatusLevel
+
+    $script:InstallSelectionState = $null
+
+    Set-UiBusy -Busy $false -StatusText $script:LblStatus.Text
+    Sync-SelectedPackages
+    Refresh-CommonSummary
+    Refresh-SelectionSummary
+}
+
+function Fail-InstallSelectedOperation {
+    param([System.Exception]$Exception)
+
+    $script:InstallSelectionState = $null
+    $script:LblStatus.Text = 'Install operation failed.'
+    Write-Log ("Install operation failed: {0}" -f $Exception.Message) 'ERROR'
+    [System.Windows.MessageBox]::Show(
+        "Install operation failed.`n`n$($Exception.Message)`n`nLog: $script:LogPath",
+        $AppTitle,
+        [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]::Error
+    ) | Out-Null
+
+    Set-UiBusy -Busy $false -StatusText $script:LblStatus.Text
+    Sync-SelectedPackages
+    Refresh-CommonSummary
+    Refresh-SelectionSummary
+}
+
+function Invoke-InstallNextSelectedPackage {
+    $state = $script:InstallSelectionState
+    if (-not $state) {
+        return
+    }
+
+    if ($state.Index -ge $state.Total) {
+        $statusText = 'Install complete. Success: {0}. Failed: {1}.' -f $state.SuccessCount, $state.FailureCount
+        $statusLevel = if ($state.FailureCount -gt 0) { 'WARN' } else { 'SUCCESS' }
+        Complete-InstallSelectedOperation -StatusText $statusText -StatusLevel $statusLevel
+        return
+    }
+
+    $package = $state.Packages[$state.Index]
+    $packageNumber = $state.Index + 1
+    Set-BusyMessage ('Installing {0}/{1}: {2}...' -f $packageNumber, $state.Total, $package.Name)
+
     try {
-        Set-UiBusy -Busy $true -StatusText 'Searching repository...'
-        Write-Log ("Repository search triggered. Query: {0}" -f $query)
-
-        $results = @(Search-WingetRepository -Query $query -Count $SearchResultLimit)
-        Set-ResultPackages -Items $results
-
-        if ($results.Count -gt 0) {
-            $script:LblStatus.Text = ('Search complete. {0} result(s).' -f $results.Count)
-            Write-Log ("Repository search complete. Results: {0}" -f $results.Count) 'SUCCESS'
-        }
-        else {
-            $script:LblStatus.Text = 'No packages found.'
-            Write-Log ("Repository search returned no results for query: {0}" -f $query) 'INFO'
-        }
+        $invocation = New-InstallPackageInvocation -Package $package -Silent $state.Silent
     }
     catch {
-        $script:LblStatus.Text = 'Search failed.'
-        Write-Log "Repository search failed: $($_.Exception.Message)" 'ERROR'
-        [System.Windows.MessageBox]::Show(
-            "Search failed.`n`n$($_.Exception.Message)`n`nLog: $script:LogPath",
-            $AppTitle,
-            [System.Windows.MessageBoxButton]::OK,
-            [System.Windows.MessageBoxImage]::Error
-        ) | Out-Null
+        Fail-InstallSelectedOperation -Exception $_.Exception
+        return
     }
-    finally {
-        Set-UiBusy -Busy $false -StatusText $script:LblStatus.Text
-        Sync-SelectedPackages
-        Refresh-CommonSummary
-        Refresh-SelectionSummary
+
+    $writeLogFn = (Get-Command -Name 'Write-Log' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $testWingetInstallNoOpSuccessFn = (Get-Command -Name 'Test-WingetInstallNoOpSuccess' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $invokeInstallNextSelectedPackageFn = (Get-Command -Name 'Invoke-InstallNextSelectedPackage' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $failInstallSelectedOperationFn = (Get-Command -Name 'Fail-InstallSelectedOperation' -CommandType Function -ErrorAction Stop).ScriptBlock
+
+    Start-WingetProcessAsync -Arguments $invocation.Arguments -StreamToLog -FriendlyName $invocation.FriendlyName -OnCompleted ({
+        param($result, $callbackError)
+
+        try {
+            if ($callbackError) {
+                throw $callbackError
+            }
+
+            if (-not $state) {
+                return
+            }
+
+            $currentPackage = $state.Packages[$state.Index]
+
+            if ($result.ExitCode -eq 0) {
+                $state.SuccessCount++
+                & $writeLogFn ("Installed '{0}' successfully." -f $currentPackage.Name) 'SUCCESS'
+            }
+            elseif (& $testWingetInstallNoOpSuccessFn -ExitCode $result.ExitCode -StdOut $result.StdOut -StdErr $result.StdErr) {
+                $state.SuccessCount++
+                & $writeLogFn ("'{0}' is already installed and no applicable newer version is available. Treating as success." -f $currentPackage.Name) 'SUCCESS'
+            }
+            else {
+                $state.FailureCount++
+                & $writeLogFn ("Failed to install '{0}'. Exit code: {1}" -f $currentPackage.Name, $result.ExitCode) 'ERROR'
+            }
+
+            $state.Index++
+            & $invokeInstallNextSelectedPackageFn
+        }
+        catch {
+            & $failInstallSelectedOperationFn -Exception $_.Exception
+        }
+    }.GetNewClosure())
+}
+
+function Complete-UpdateAllOperation {
+    param(
+        [string]$StatusText,
+        [string]$StatusLevel = 'INFO'
+    )
+
+    $script:LblStatus.Text = $StatusText
+    Write-Log $StatusText $StatusLevel
+
+    $script:UpdateAllState = $null
+    Set-UiBusy -Busy $false -StatusText $script:LblStatus.Text
+}
+
+function Fail-UpdateAllOperation {
+    param([System.Exception]$Exception)
+
+    $script:UpdateAllState = $null
+    $script:LblStatus.Text = 'Update-all operation failed.'
+    Write-Log ("Update-all operation failed: {0}" -f $Exception.Message) 'ERROR'
+    [System.Windows.MessageBox]::Show(
+        "Update-all operation failed.`n`n$($Exception.Message)`n`nLog: $script:LogPath",
+        $AppTitle,
+        [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]::Error
+    ) | Out-Null
+
+    Set-UiBusy -Busy $false -StatusText $script:LblStatus.Text
+}
+
+function Invoke-UpdateAllNextPackage {
+    $state = $script:UpdateAllState
+    if (-not $state) {
+        return
     }
+
+    if ($state.Index -ge $state.Total) {
+        $statusText = if ($state.FailureCount -eq 0) {
+            'Update all completed successfully. Upgraded {0} package(s).' -f $state.SuccessCount
+        }
+        else {
+            'Update all finished. Success: {0}. Failed: {1}.' -f $state.SuccessCount, $state.FailureCount
+        }
+
+        $statusLevel = if ($state.FailureCount -eq 0) { 'SUCCESS' } else { 'WARN' }
+        Complete-UpdateAllOperation -StatusText $statusText -StatusLevel $statusLevel
+        return
+    }
+
+    $package = $state.Packages[$state.Index]
+    $packageNumber = $state.Index + 1
+    Set-BusyMessage ('Upgrading {0}/{1}: {2}...' -f $packageNumber, $state.Total, $package.Name)
+
+    $wingetLog = New-WingetLogPath -Prefix 'upgrade'
+    $args = @(
+        'upgrade',
+        '--id', $package.Id,
+        '--exact',
+        '--accept-source-agreements',
+        '--accept-package-agreements',
+        '--log', $wingetLog
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$package.Source)) {
+        $args += @('--source', [string]$package.Source)
+    }
+
+    if ($state.Silent) {
+        $args += '--silent'
+    }
+    else {
+        $args += '--interactive'
+    }
+
+    Write-Log ("Upgrading '{0}' ({1}) from {2} to {3}. Native winget log: {4}" -f $package.Name, $package.Id, $package.Version, $package.Available, $wingetLog)
+
+    $writeLogFn = (Get-Command -Name 'Write-Log' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $testWingetInstallNoOpSuccessFn = (Get-Command -Name 'Test-WingetInstallNoOpSuccess' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $invokeUpdateAllNextPackageFn = (Get-Command -Name 'Invoke-UpdateAllNextPackage' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $failUpdateAllOperationFn = (Get-Command -Name 'Fail-UpdateAllOperation' -CommandType Function -ErrorAction Stop).ScriptBlock
+
+    Start-WingetProcessAsync -Arguments $args -StreamToLog -FriendlyName ('upgrade {0}' -f $package.Name) -OnCompleted ({
+        param($result, $callbackError)
+
+        try {
+            if ($callbackError) {
+                throw $callbackError
+            }
+
+            if (-not $state) {
+                return
+            }
+
+            $currentPackage = $state.Packages[$state.Index]
+
+            if ($result.ExitCode -eq 0) {
+                $state.SuccessCount++
+                & $writeLogFn ("Upgraded '{0}' successfully." -f $currentPackage.Name) 'SUCCESS'
+            }
+            elseif (& $testWingetInstallNoOpSuccessFn -ExitCode $result.ExitCode -StdOut $result.StdOut -StdErr $result.StdErr) {
+                $state.SuccessCount++
+                & $writeLogFn ("'{0}' no longer has an applicable upgrade. Treating as success." -f $currentPackage.Name) 'SUCCESS'
+            }
+            else {
+                $state.FailureCount++
+                & $writeLogFn ("Failed to upgrade '{0}'. Exit code: {1}" -f $currentPackage.Name, $result.ExitCode) 'ERROR'
+            }
+
+            $state.Index++
+            & $invokeUpdateAllNextPackageFn
+        }
+        catch {
+            & $failUpdateAllOperationFn -Exception $_.Exception
+        }
+    }.GetNewClosure())
+}
+
+function Start-WingetUpdateAllAsync {
+    param([bool]$Silent)
+
+    $args = @(
+        'list',
+        '--upgrade-available',
+        '--accept-source-agreements',
+        '--disable-interactivity'
+    )
+
+    Write-Log 'Enumerating installed packages with available upgrades.'
+
+    $convertFromWingetUpgradeListOutputFn = (Get-Command -Name 'ConvertFrom-WingetUpgradeListOutput' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $writeLogFn = (Get-Command -Name 'Write-Log' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $completeUpdateAllOperationFn = (Get-Command -Name 'Complete-UpdateAllOperation' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $invokeUpdateAllNextPackageFn = (Get-Command -Name 'Invoke-UpdateAllNextPackage' -CommandType Function -ErrorAction Stop).ScriptBlock
+    $failUpdateAllOperationFn = (Get-Command -Name 'Fail-UpdateAllOperation' -CommandType Function -ErrorAction Stop).ScriptBlock
+
+    Start-WingetProcessAsync -Arguments $args -CaptureOutput -FriendlyName 'list upgrade-available' -OnCompleted ({
+        param($result, $callbackError)
+
+        try {
+            if ($callbackError) {
+                throw $callbackError
+            }
+
+            $allText = $result.StdOut + "`n" + $result.StdErr
+            $packages = @(& $convertFromWingetUpgradeListOutputFn -Text $allText)
+
+            if ($result.ExitCode -ne 0 -and $packages.Count -eq 0 -and ($allText -notmatch '(?i)(No package found|No installed package found|No applicable upgrade found|No installed package matching input criteria)')) {
+                throw "winget list --upgrade-available failed with exit code $($result.ExitCode)."
+            }
+
+            & $writeLogFn ("Upgradeable package count: {0}" -f $packages.Count)
+
+            if (-not $packages.Count) {
+                & $completeUpdateAllOperationFn -StatusText 'No upgrades are currently available.' -StatusLevel 'INFO'
+                return
+            }
+
+            $script:UpdateAllState = [pscustomobject]@{
+                Packages     = @($packages)
+                Index        = 0
+                Total        = $packages.Count
+                Silent       = $Silent
+                SuccessCount = 0
+                FailureCount = 0
+            }
+
+            & $invokeUpdateAllNextPackageFn
+        }
+        catch {
+            & $failUpdateAllOperationFn -Exception $_.Exception
+        }
+    }.GetNewClosure())
 }
 
 function Invoke-InstallSelectedFromUi {
@@ -1476,44 +1998,20 @@ function Invoke-InstallSelectedFromUi {
     }
 
     $silent = [bool]$script:ChkSilent.IsChecked
-    $successCount = 0
-    $failureCount = 0
 
-    try {
-        Set-UiBusy -Busy $true -StatusText 'Installing selected packages...'
-        Write-Log ("Install triggered. Package count: {0}. Silent: {1}" -f $selected.Count, $silent)
+    Set-UiBusy -Busy $true -StatusText 'Preparing selected packages for installation...'
+    Write-Log ("Install triggered. Package count: {0}. Silent: {1}" -f $selected.Count, $silent)
 
-        foreach ($package in $selected) {
-            Set-BusyMessage ('Installing {0}...' -f $package.Name)
-
-            if (Install-PackageSelection -Package $package -Silent $silent) {
-                $successCount++
-            }
-            else {
-                $failureCount++
-            }
-        }
-
-        $script:LblStatus.Text = ('Install complete. Success: {0}. Failed: {1}.' -f $successCount, $failureCount)
-        $statusLevel = if ($failureCount -gt 0) { 'WARN' } else { 'SUCCESS' }
-        Write-Log $script:LblStatus.Text $statusLevel
+    $script:InstallSelectionState = [pscustomobject]@{
+        Packages     = @($selected)
+        Index        = 0
+        Total        = $selected.Count
+        Silent       = $silent
+        SuccessCount = 0
+        FailureCount = 0
     }
-    catch {
-        $script:LblStatus.Text = 'Install operation failed.'
-        Write-Log "Install operation failed: $($_.Exception.Message)" 'ERROR'
-        [System.Windows.MessageBox]::Show(
-            "Install operation failed.`n`n$($_.Exception.Message)`n`nLog: $script:LogPath",
-            $AppTitle,
-            [System.Windows.MessageBoxButton]::OK,
-            [System.Windows.MessageBoxImage]::Error
-        ) | Out-Null
-    }
-    finally {
-        Set-UiBusy -Busy $false -StatusText $script:LblStatus.Text
-        Sync-SelectedPackages
-        Refresh-CommonSummary
-        Refresh-SelectionSummary
-    }
+
+    Invoke-InstallNextSelectedPackage
 }
 
 function Invoke-UpdateAllFromUi {
@@ -1534,36 +2032,15 @@ function Invoke-UpdateAllFromUi {
         return
     }
 
-    try {
-        Set-UiBusy -Busy $true -StatusText 'Enumerating and upgrading installed packages... (This operation can take a long time, be patient.)'
-        Write-Log ("Update-all triggered. Silent: {0}" -f $silent)
+    Set-UiBusy -Busy $true -StatusText 'Enumerating and upgrading installed packages... (This operation can take a long time, be patient.)'
+    Write-Log ("Update-all triggered. Silent: {0}" -f $silent)
 
-        $ok = Invoke-WingetUpdateAll -Silent $silent -ProgressCallback {
-            param($message)
-            Set-BusyMessage $message
-        }
-        $script:LblStatus.Text = if ($ok) { 'Update all completed successfully.' } else { 'Update all finished with errors.' }
-    }
-    catch {
-        $script:LblStatus.Text = 'Update-all operation failed.'
-        Write-Log "Update-all operation failed: $($_.Exception.Message)" 'ERROR'
-        [System.Windows.MessageBox]::Show(
-            "Update-all operation failed.`n`n$($_.Exception.Message)`n`nLog: $script:LogPath",
-            $AppTitle,
-            [System.Windows.MessageBoxButton]::OK,
-            [System.Windows.MessageBoxImage]::Error
-        ) | Out-Null
-    }
-    finally {
-        Set-UiBusy -Busy $false -StatusText $script:LblStatus.Text
-    }
+    Start-WingetUpdateAllAsync -Silent $silent
 }
 #endregion
 
 #region Event wiring
-$script:BtnSelectAllCommon.Add_Click({ Select-AllCommon })
 $script:BtnClearAllCommon.Add_Click({ Clear-AllCommon })
-$script:BtnRefreshCommon.Add_Click({ Clear-SearchResults; Refresh-CommonSummary; Refresh-SelectionSummary; Write-Log 'Startup catalog reloaded into results panel.' 'SUCCESS' })
 $script:BtnSearch.Add_Click({ Invoke-RepositorySearchFromUi })
 $script:BtnClearSearch.Add_Click({ Clear-SearchResults })
 $script:BtnOpenLogs.Add_Click({ Start-Process explorer.exe $script:LogRoot })
